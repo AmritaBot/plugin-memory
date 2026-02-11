@@ -1,0 +1,64 @@
+[project]
+name = "amrita_plugin_name"
+description = "Add your plugin description here."
+version = "0.1.0"
+dependencies = [
+    "amrita[full]>=0.4.2",
+]
+readme = "README.md"
+requires-python = ">=3.10, <3.14"
+
+[tool.nonebot]
+plugins = [
+    "nonebot_plugin_orm",
+]
+plugin_dirs = []
+
+[tool.setuptools.packages.find]
+include = ["amrita_plugin_name"]
+
+[[tool.nonebot.adapters]]
+name = "OneBot V11"
+module_name = "nonebot.adapters.onebot.v11"
+
+[tool.uv]
+dev-dependencies = [
+    "ruff>=0.12.8",
+    "nonebot-plugin-orm[default]>=0.8.2",
+    #"pytest>=8.4.1",
+]
+package = true
+
+[tool.ruff]
+line-length = 88
+target-version = "py310"
+[tool.ruff.lint]
+select = [
+    "F",     # Pyflakes
+    "W",     # pycodestyle warnings
+    "E",     # pycodestyle errors
+    "UP",    # pyupgrade
+    "ASYNC", # flake8-async
+    "C4",    # flake8-comprehensions
+    "T10",   # flake8-debugger
+    "PYI",   # flake8-pyi
+    "PT",    # flake8-pytest-style
+    "Q",     # flake8-quotes
+    "RUF",   # Ruff-specific rules
+    "I",     # isort
+    "PERF",  # pylint-performance
+]
+ignore = [
+    "E402",   # module-import-not-at-top-of-file
+    "E501",   # line-too-long
+    "UP037",  # quoted-annotation
+    "RUF001", # ambiguous-unicode-character-string
+    "RUF002", # ambiguous-unicode-character-docstring
+    "RUF003", # ambiguous-unicode-character-comment
+]
+
+[tool.pyright]
+typeCheckingMode = "standard"
+
+[tool.amrita]
+plugins=["amrita_plugin_name"]
