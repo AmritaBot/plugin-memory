@@ -45,6 +45,14 @@ class EnvConfig(BaseModel):
         default={},
         description="ChromaDB向量数据库远程服务器的请求头(当且仅当vector_db_type为remote时生效)",
     )
+    vector_db_tenant: str = Field(
+        default="default",
+        description="ChromaDB向量数据库租户名称(当且仅当vector_db_type为remote时生效)",
+    )
+    vector_db_database: str = Field(
+        default="default",
+        description="ChromaDB向量数据库数据库名称(当且仅当vector_db_type为remote时生效)",
+    )
     embedding_model_url: str = Field(
         default="http://127.0.0.1:11434", description="Embedding模型地址"
     )

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import uuid
 from asyncio import to_thread
+from collections import defaultdict
 from collections.abc import Awaitable, Callable, Sequence
 from datetime import datetime
 from functools import wraps
@@ -10,9 +11,11 @@ from types import CoroutineType
 from typing import Any, Literal, TypeVar, overload
 from uuid import UUID
 
+import aiologic
 import chromadb
 from amrita_core.libchat import call_embedding
 from amrita_core.types import EmbeddingChunk
+from amrita_core.weakcache import WeakValueLRUCache
 from chromadb.api import ClientAPI
 from chromadb.api.collection_configuration import (
     CreateCollectionConfiguration,
@@ -32,9 +35,19 @@ from nonebot import get_driver, logger
 from pydantic import BaseModel, Field
 from pytz import utc
 
-from .config import PLUGIN_IM, VECTOR_DB_PATH, build_preset, env_config
+from .config import VECTOR_DB_PATH, build_preset, env_config
 
 T = TypeVar("T")
+_collection_lock_pool: defaultdict[str, WeakValueLRUCache[str, aiologic.Lock]] = (
+    defaultdict(lambda: WeakValueLRUCache(capacity=1024, loose_mode=True))
+)
+
+
+def get_lock(collection: str, uid: str) -> aiologic.Lock:
+    if (lock := _collection_lock_pool[collection].get(uid)) is None:
+        lock = aiologic.Lock()
+        _collection_lock_pool[collection][uid] = lock
+    return lock
 
 
 @overload
@@ -58,15 +71,13 @@ def any_to_thread(func: Callable[..., Awaitable[T] | T], /, *args, **kwargs):
 def get_db_conn() -> ClientAPI:
     match env_config.vector_db_type:
         case "local":
-            db = chromadb.PersistentClient(
-                path=VECTOR_DB_PATH, tenant=PLUGIN_IM, database=PLUGIN_IM
-            )
+            db = chromadb.PersistentClient(path=VECTOR_DB_PATH)
         case "remote":
             db = chromadb.HttpClient(
                 host=env_config.vector_db_server,
                 port=env_config.vector_db_port,
-                tenant=PLUGIN_IM,
-                database=PLUGIN_IM,
+                tenant=env_config.vector_db_tenant,
+                database=env_config.vector_db_database,
                 headers=env_config.vector_db_remote_headers,
                 ssl=env_config.vector_db_server_ssl,
             )
@@ -78,11 +89,13 @@ def get_db_conn() -> ClientAPI:
 @get_driver().on_startup
 async def _setup():
     logger.info("正在尝试向量数据库连接...")
-    logger.info("当前向量数据库类型: %s", env_config.vector_db_type)
+    logger.info(
+        f"当前向量数据库类型: {env_config.vector_db_type}",
+    )
     db = get_db_conn()
     logger.info("创建了向量数据库客户端！")
-    logger.info("向量数据库版本：%s", db.get_version())
-    logger.info("所有可用集合：%s", db.list_collections())
+    logger.info(f"向量数据库版本：{db.get_version()}")
+    logger.info(f"所有可用集合：{db.list_collections()}")
     logger.info("完成。")
 
 
@@ -314,7 +327,7 @@ class AsyncUserMemory:
         self,
         client: ClientAPI,
         collection_name: str = "amrita_user_memory",
-    ):
+    ) -> None:
         self.api = WrappedClientAPI(client)
         self._collection_name = collection_name
 
@@ -338,73 +351,83 @@ class AsyncUserMemory:
 
     @require_init
     async def add_note(self, user_id: str, note_text: str, metadata: MemoryMetadata):
-        vector: Sequence[EmbeddingChunk] = await call_embedding(
-            note_text, build_preset()
-        )
-        if len(vector) == 0:
-            raise RuntimeError("No embedding returned")
-        await any_to_thread(
-            self._collection.add,
-            ids=[metadata.memory_id],
-            metadatas=[
-                {
-                    "user_id": user_id,
-                    "user_type": metadata.user_type,
-                    "tags": metadata.tags,
-                    "importance": metadata.importance,
-                    "created_at": metadata.created_at.isoformat(),
-                }
-            ],
-            embeddings=[vector[0].embedding],
-            documents=[note_text],
-        )
+        async with get_lock(self._collection_name, user_id):
+            vector: Sequence[EmbeddingChunk] = await call_embedding(
+                note_text, build_preset()
+            )
+            if len(vector) == 0:
+                raise RuntimeError("No embedding returned")
+            await any_to_thread(
+                self._collection.add,
+                ids=[metadata.memory_id],
+                metadatas=[
+                    {
+                        "user_id": user_id,
+                        "user_type": metadata.user_type,
+                        "tags": metadata.tags,
+                        "importance": metadata.importance,
+                        "created_at": metadata.created_at.isoformat(),
+                    }
+                ],
+                embeddings=[vector[0].embedding],
+                documents=[note_text],
+            )
 
     @require_init
     async def query_notes(
         self,
         user_id: str,
         query_text: str,
+        importance: Literal["low", "medium", "high"] | None = None,
         top_k: int = 5,
         include: chromadb.Include = ["metadatas", "documents"],
     ) -> chromadb.QueryResult:
-        queue_embedding = await call_embedding(query_text, build_preset())
-        assert len(queue_embedding) == 1, "Invalid embedding vector length"
-        return await any_to_thread(
-            self._collection.query,
-            queue_embedding[0].embedding,
-            [
-                query_text,
-            ],
-            include=include,
-            n_results=top_k,
-            where={"user_id": user_id},
-        )
+        async with get_lock(self._collection_name, user_id):
+            queue_embedding = await call_embedding(query_text, build_preset())
+            assert len(queue_embedding) == 1, "Invalid embedding vector length"
+            return await any_to_thread(
+                self._collection.query,
+                queue_embedding[0].embedding,
+                [
+                    query_text,
+                ],
+                include=include,
+                n_results=top_k,
+                where={
+                    "user_id": user_id,
+                    **({"importance": importance} if importance else {}),
+                },
+            )
 
     @require_init
     async def get_all_notes(
         self, user_id: str, include: chromadb.Include = ["metadatas", "documents"]
     ) -> chromadb.GetResult:
-        return await any_to_thread(
-            self._collection.get,
-            include=include,
-            where={"user_id": user_id},
-        )
+        async with get_lock(self._collection_name, user_id):
+            return await any_to_thread(
+                self._collection.get,
+                include=include,
+                where={"user_id": user_id},
+            )
 
     async def delete_note(self, user_id: str, doc_id: str):
-        await any_to_thread(
-            self._collection.delete,
-            ids=[doc_id],
-            where={"user_id": user_id},
-        )
+        async with get_lock(self._collection_name, user_id):
+            await any_to_thread(
+                self._collection.delete,
+                ids=[doc_id],
+                where={"user_id": user_id},
+            )
 
     async def delete_user_all_notes(self, user_id: str):
-        await any_to_thread(
-            self._collection.delete,
-            where={"user_id": user_id},
-        )
+        async with get_lock(self._collection_name, user_id):
+            await any_to_thread(
+                self._collection.delete,
+                where={"user_id": user_id},
+            )
 
     async def count_user_notes(self, user_id: str) -> int:
-        result = await any_to_thread(
-            self._collection.get, where={"user_id": user_id}, include=[]
-        )
-        return len(result["ids"])
+        async with get_lock(self._collection_name, user_id):
+            result = await any_to_thread(
+                self._collection.get, where={"user_id": user_id}, include=[]
+            )
+            return len(result["ids"])

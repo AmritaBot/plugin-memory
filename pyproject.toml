@@ -4,6 +4,7 @@ description = "Amrita长期记忆插件"
 version = "0.1.0"
 dependencies = [
     "aiohttp>=3.13.3",
+    "aiologic>=0.16.0",
     "amrita-core>=0.8.5",
     "amrita[full]>=1.1.9",
     "chromadb>=1.5.8",
