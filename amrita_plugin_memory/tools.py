@@ -8,6 +8,7 @@ from amrita_core import (
     ToolContext,
     on_tools,
 )
+from chromadb import QueryResult
 from nonebot import logger
 
 from .vector import AsyncUserMemory, MemoryMetadata, get_db_conn
@@ -30,11 +31,6 @@ WRITE_MEMORY_FUN = FunctionDefinitionSchema(
                 description="重要性等级",
                 enum=["low", "medium", "high"],
             ),
-            "group_if": FunctionPropertySchema(
-                type="boolean",
-                description="如果你认为当前是在群内，并且此记忆是为群存入的，请将此参数设置为True，如果只是为最后一条消息的用户，请将此参数设置为False",
-                default=False,
-            ),
         },
         required=["content", "expiry_hint", "importance"],
     ),
@@ -49,11 +45,17 @@ READ_MEMORY_FUN = FunctionDefinitionSchema(
                 type="string",
                 description="字符串，用空格分割关键词",
             ),
-            "limit": FunctionPropertySchema(
-                type="integer", description="返回数量，默认5条"
+            "top_k": FunctionPropertySchema(
+                type="integer", description="返回数量，默认5条", default=5
+            ),
+            "importance": FunctionPropertySchema(
+                type="string",
+                description="重要性等级，Optional",
+                enum=["low", "medium", "high"],
+                nullable=True,
             ),
         },
-        required=["query"],
+        required=["query", "importance"],
     ),
 )
 
@@ -124,11 +126,6 @@ async def w(ctx: ToolContext):
     meta = MemoryMetadata(
         importance=ctx.data["importance"],
         tags=ctx.data["tags"],
-        user_type=(
-            "group"
-            if getattr(nb_event, "group_id", None) and ctx.data["group_if"]
-            else "private"
-        ),
     )
     await ope.add_note(
         nb_event.get_session_id(),
@@ -138,3 +135,20 @@ async def w(ctx: ToolContext):
     dmp = meta.model_dump()
     dmp["status"] = "success"
     return json.dumps(dmp, ensure_ascii=False, indent=4)
+
+
+@on_tools(READ_MEMORY_FUN, custom_run=True, strict=True)
+async def r(ctx: ToolContext):
+    assert isinstance(ctx.ctx.chat_object, AmritaChatObject)
+    nb_event = ctx.ctx.chat_object.event
+    ope = AsyncUserMemory(get_db_conn())
+    await ope.init()
+    logger.debug("开始检索记忆...")
+    logger.debug(f"会话ID: {nb_event.get_session_id()}")
+    res: QueryResult = await ope.query_notes(
+        nb_event.get_session_id(),
+        ctx.data["query"],
+        top_k=ctx.data["top_k"],
+        importance=ctx.data.get("importance"),
+    )
+    return json.dumps(res, ensure_ascii=False, indent=4)

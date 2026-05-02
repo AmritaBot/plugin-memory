@@ -307,7 +307,6 @@ class WrappedClientAPI:
 
 
 class MemoryMetadata(BaseModel):
-    user_type: str = Field(description="用户类型")
     memory_id: str = Field(
         description="记忆ID", default_factory=lambda: uuid.uuid4().hex
     )
@@ -363,7 +362,6 @@ class AsyncUserMemory:
                 metadatas=[
                     {
                         "user_id": user_id,
-                        "user_type": metadata.user_type,
                         "tags": metadata.tags,
                         "importance": metadata.importance,
                         "created_at": metadata.created_at.isoformat(),
