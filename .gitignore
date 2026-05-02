@@ -186,3 +186,4 @@ pyrightconfig.json
 logs/*
 data/*
 config/*
+.amrita/*
