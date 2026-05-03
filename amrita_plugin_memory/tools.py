@@ -116,7 +116,7 @@ LIST_MEMORY_FUN = FunctionDefinitionSchema(
 
 
 @on_tools(WRITE_MEMORY_FUN, custom_run=True, strict=True)
-async def w(ctx: ToolContext):
+async def w(ctx: ToolContext) -> str:
     assert isinstance(ctx.ctx.chat_object, AmritaChatObject)
     nb_event = ctx.ctx.chat_object.event
     ope = AsyncUserMemory(get_db_conn())
@@ -151,7 +151,7 @@ async def w(ctx: ToolContext):
 
 
 @on_tools(READ_MEMORY_FUN, custom_run=True, strict=True)
-async def r(ctx: ToolContext):
+async def r(ctx: ToolContext) -> str:
     assert isinstance(ctx.ctx.chat_object, AmritaChatObject)
     nb_event = ctx.ctx.chat_object.event
     ope = AsyncUserMemory(get_db_conn())
@@ -168,7 +168,7 @@ async def r(ctx: ToolContext):
 
 
 @on_tools(UPDATE_FUN, custom_run=True, strict=True)
-async def update_memory(ctx: ToolContext):
+async def update_memory(ctx: ToolContext) -> str:
     assert isinstance(ctx.ctx.chat_object, AmritaChatObject)
     nb_event = ctx.ctx.chat_object.event
     ope = AsyncUserMemory(get_db_conn())
@@ -274,7 +274,7 @@ async def update_memory(ctx: ToolContext):
 
 
 @on_tools(DELETE_FUN, custom_run=True, strict=True)
-async def delete_memory(ctx: ToolContext):
+async def delete_memory(ctx: ToolContext) -> str:
     assert isinstance(ctx.ctx.chat_object, AmritaChatObject)
     nb_event = ctx.ctx.chat_object.event
     ope = AsyncUserMemory(get_db_conn())
@@ -321,7 +321,7 @@ async def delete_memory(ctx: ToolContext):
 
 
 @on_tools(LIST_MEMORY_FUN, custom_run=True, strict=True)
-async def list_memory(ctx: ToolContext):
+async def list_memory(ctx: ToolContext) -> str:
     assert isinstance(ctx.ctx.chat_object, AmritaChatObject)
     nb_event = ctx.ctx.chat_object.event
     ope = AsyncUserMemory(get_db_conn())
