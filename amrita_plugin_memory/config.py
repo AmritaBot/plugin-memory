@@ -23,6 +23,9 @@ class ConfigFile(BaseModel):
     permanent_expiry_days: int = Field(
         default=365, description="永久记忆的过期天数，默认为1年"
     )
+    per_session_memory_limit: int = Field(
+        default=50, description="每个会话的记忆数量限制，默认为50条"
+    )
 
 
 class EnvConfig(BaseModel):
@@ -62,7 +65,7 @@ class EnvConfig(BaseModel):
     )
 
 
-class DataManager(BaseDataManager):
+class DataManager(BaseDataManager[ConfigFile]):
     config: ConfigFile
 
 

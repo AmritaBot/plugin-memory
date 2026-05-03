@@ -408,6 +408,7 @@ class AsyncUserMemory:
                 where={"user_id": user_id},
             )
 
+    @require_init
     async def delete_note(self, user_id: str, doc_id: str):
         async with get_lock(self._collection_name, user_id):
             await any_to_thread(
@@ -416,6 +417,7 @@ class AsyncUserMemory:
                 where={"user_id": user_id},
             )
 
+    @require_init
     async def delete_user_all_notes(self, user_id: str):
         async with get_lock(self._collection_name, user_id):
             await any_to_thread(
@@ -423,6 +425,7 @@ class AsyncUserMemory:
                 where={"user_id": user_id},
             )
 
+    @require_init
     async def count_user_notes(self, user_id: str) -> int:
         async with get_lock(self._collection_name, user_id):
             result = await any_to_thread(
