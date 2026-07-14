@@ -352,7 +352,7 @@ class AsyncUserMemory:
     async def add_note(self, user_id: str, note_text: str, metadata: MemoryMetadata):
         async with get_lock(self._collection_name, user_id):
             vector: Sequence[EmbeddingChunk] = await call_embedding(
-                note_text, build_preset()
+                [note_text], build_preset()
             )
             if len(vector) == 0:
                 raise RuntimeError("No embedding returned")
@@ -377,7 +377,7 @@ class AsyncUserMemory:
         """更新指定记忆，使用 ChromaDB 原生 update 保证原子性"""
         async with get_lock(self._collection_name, user_id):
             vector: Sequence[EmbeddingChunk] = await call_embedding(
-                note_text, build_preset()
+                [note_text], build_preset()
             )
             if len(vector) == 0:
                 raise RuntimeError("No embedding returned")
@@ -407,7 +407,7 @@ class AsyncUserMemory:
         include: chromadb.Include = ["metadatas", "documents"],
     ) -> chromadb.QueryResult:
         async with get_lock(self._collection_name, user_id):
-            queue_embedding = await call_embedding(query_text, build_preset())
+            queue_embedding = await call_embedding([query_text], build_preset())
             assert len(queue_embedding) == 1, "Invalid embedding vector length"
             return await any_to_thread(
                 self._collection.query,

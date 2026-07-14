@@ -4,14 +4,14 @@ Amrita 长期记忆插件 —— 基于 ChromaDB 向量数据库的智能记忆�
 
 ## 技术栈
 
-| 组件 | 技术 |
-|------|------|
-| 后端框架 | Python 3.10+ / NoneBot2 / Amrita Core |
+| 组件       | 技术                                                    |
+| ---------- | ------------------------------------------------------- |
+| 后端框架   | Python 3.10+ / NoneBot2 / Amrita Core                   |
 | 向量数据库 | ChromaDB（支持本地 PersistentClient 与远程 HttpClient） |
-| 嵌入模型 | OpenAI Embedding API / Ollama Embedding API |
-| 配置管理 | Pydantic + TOML |
-| 异步处理 | asyncio + aiologic + aiohttp |
-| 代码质量 | Ruff + Pyright |
+| 嵌入模型   | OpenAI Embedding API / Ollama Embedding API             |
+| 配置管理   | Pydantic + TOML                                         |
+| 异步处理   | asyncio + aiologic + aiohttp                            |
+| 代码质量   | Ruff + Pyright                                          |
 
 ## 架构概览
 
@@ -46,79 +46,80 @@ amrita_plugin_memory/
 
 将当前用户（或群组）的重要信息存入长期记忆。
 
-| 参数 | 类型 | 必需 | 描述 |
-|------|------|------|------|
-| `content` | string | ✅ | 记忆内容，简洁明了 |
-| `tags` | string | ✅ | 分类标签，如 `preference`、`project` |
-| `importance` | `"low"` / `"medium"` / `"high"` | ✅ | 重要性等级 |
-| `scope` | `"group"` / `"user"` | ✅ | `group`=群共享，`user`=个人专属（私聊不可用 `group`） |
+| 参数         | 类型                            | 必需 | 描述                                                  |
+| ------------ | ------------------------------- | ---- | ----------------------------------------------------- |
+| `content`    | string                          | ✅   | 记忆内容，简洁明了                                    |
+| `tags`       | string                          | ✅   | 分类标签，如 `preference`、`project`                  |
+| `importance` | `"low"` / `"medium"` / `"high"` | ✅   | 重要性等级                                            |
+| `scope`      | `"group"` / `"user"`            | ✅   | `group`=群共享，`user`=个人专属（私聊不可用 `group`） |
 
 ### 2. `read_memory` —— 检索记忆
 
 从记忆库中按语义相似度检索用户相关信息。
 
-| 参数 | 类型 | 必需 | 默认值 | 描述 |
-|------|------|------|--------|------|
-| `query` | string | ✅ | — | 关键词字符串，空格分隔 |
-| `top_k` | integer | ❌ | `5` | 返回结果数量 |
-| `importance` | `"low"` / `"medium"` / `"high"` | ❌ | — | 按重要性过滤 |
-| `scope` | `"group"` / `"user"` | ✅ | — | 检索范围：群共享或个人专属 |
+| 参数         | 类型                            | 必需 | 默认值 | 描述                       |
+| ------------ | ------------------------------- | ---- | ------ | -------------------------- |
+| `query`      | string                          | ✅   | —      | 关键词字符串，空格分隔     |
+| `top_k`      | integer                         | ❌   | `5`    | 返回结果数量               |
+| `importance` | `"low"` / `"medium"` / `"high"` | ❌   | —      | 按重要性过滤               |
+| `scope`      | `"group"` / `"user"`            | ✅   | —      | 检索范围：群共享或个人专属 |
 
 ### 3. `update_memory` —— 更新记忆
 
 更新指定 ID 的记忆内容、标签或重要性。
 
-| 参数 | 类型 | 必需 | 描述 |
-|------|------|------|------|
-| `id` | string | ✅ | 要更新的记忆 ID |
-| `scope` | `"group"` / `"user"` | ✅ | 记忆所属范围 |
-| `content` | string | ❌ | 新的记忆内容 |
-| `tags` | string | ❌ | 新的标签 |
-| `importance` | `"low"` / `"medium"` / `"high"` | ❌ | 新的重要性等级 |
+| 参数         | 类型                            | 必需 | 描述            |
+| ------------ | ------------------------------- | ---- | --------------- |
+| `id`         | string                          | ✅   | 要更新的记忆 ID |
+| `scope`      | `"group"` / `"user"`            | ✅   | 记忆所属范围    |
+| `content`    | string                          | ❌   | 新的记忆内容    |
+| `tags`       | string                          | ❌   | 新的标签        |
+| `importance` | `"low"` / `"medium"` / `"high"` | ❌   | 新的重要性等级  |
 
 ### 4. `delete_memory` —— 删除记忆
 
 删除指定 ID 的记忆。
 
-| 参数 | 类型 | 必需 | 描述 |
-|------|------|------|------|
-| `id` | string | ✅ | 要删除的记忆 ID |
-| `scope` | `"group"` / `"user"` | ✅ | 记忆所属范围 |
+| 参数    | 类型                 | 必需 | 描述            |
+| ------- | -------------------- | ---- | --------------- |
+| `id`    | string               | ✅   | 要删除的记忆 ID |
+| `scope` | `"group"` / `"user"` | ✅   | 记忆所属范围    |
 
 ### 5. `list_memory` —— 列出记忆
 
 列出当前用户的所有记忆（返回 scope、标签和 ID）。
 
-| 参数 | 类型 | 必需 | 默认值 | 描述 |
-|------|------|------|--------|------|
-| `limit` | integer | ❌ | `5` | 返回数量限制 |
-| `scope` | `"group"` / `"user"` | ✅ | — | 列出范围：群共享或个人专属 |
+| 参数    | 类型                 | 必需 | 默认值 | 描述                       |
+| ------- | -------------------- | ---- | ------ | -------------------------- |
+| `limit` | integer              | ❌   | `5`    | 返回数量限制               |
+| `scope` | `"group"` / `"user"` | ✅   | —      | 列出范围：群共享或个人专属 |
 
 ## 配置选项
 
 ### 文件配置（`config/amrita_plugin_memory/config.toml`）
 
-| 配置项 | 类型 | 默认值 | 描述 |
-|--------|------|--------|------|
-| `short_term_expiry_days` | int | `3` | 短期记忆过期天数 |
-| `long_term_expiry_days` | int | `30` | 长期记忆过期天数 |
-| `permanent_expiry_days` | int | `365` | 永久记忆过期天数 |
-| `per_session_memory_limit` | int | `50` | 每个会话的记忆数量上限 |
+| 配置项                     | 类型 | 默认值 | 描述                   |
+| -------------------------- | ---- | ------ | ---------------------- |
+| `short_term_expiry_days`   | int  | `3`    | 短期记忆过期天数       |
+| `long_term_expiry_days`    | int  | `30`   | 长期记忆过期天数       |
+| `permanent_expiry_days`    | int  | `365`  | 永久记忆过期天数       |
+| `per_session_memory_limit` | int  | `50`   | 每个会话的记忆数量上限 |
 
 ### 环境变量（`.env` 或系统环境变量）
 
-| 变量 | 类型 | 默认值 | 描述 |
-|------|------|--------|------|
-| `VECTOR_DB_TYPE` | `local` / `remote` | `local` | ChromaDB 数据库类型 |
-| `VECTOR_DB_SERVER` | string | `127.0.0.1` | 远程 ChromaDB 地址 |
-| `VECTOR_DB_PORT` | int | `8000` | 远程 ChromaDB 端口 |
-| `VECTOR_DB_SERVER_SSL` | bool | `false` | 是否启用 SSL |
-| `VECTOR_DB_REMOTE_HEADERS` | dict | `{}` | 远程请求头 |
-| `VECTOR_DB_TENANT` | string | `default` | 租户名称 |
-| `VECTOR_DB_DATABASE` | string | `default` | 数据库名称 |
-| `EMBEDDING_MODEL_URL` | string | `http://127.0.0.1:11434` | 嵌入模型地址 |
-| `EMBEDDING_MODEL_NAME` | string | `auto` | 嵌入模型名称 |
-| `EMBEDDING_PROCTOL` | `openai` / `ollama-embed` | `ollama-embed` | 嵌入模型协议 |
+| 变量                       | 类型                      | 默认值                   | 描述                      |
+| -------------------------- | ------------------------- | ------------------------ | ------------------------- |
+| `VECTOR_DB_TYPE`           | `local` / `remote`        | `local`                  | ChromaDB 数据库类型       |
+| `VECTOR_DB_SERVER`         | string                    | `127.0.0.1`              | 远程 ChromaDB 地址        |
+| `VECTOR_DB_PORT`           | int                       | `8000`                   | 远程 ChromaDB 端口        |
+| `VECTOR_DB_SERVER_SSL`     | bool                      | `false`                  | 是否启用 SSL              |
+| `VECTOR_DB_REMOTE_HEADERS` | dict                      | `{}`                     | 远程请求头                |
+| `VECTOR_DB_TENANT`         | string                    | `default`                | 租户名称                  |
+| `VECTOR_DB_DATABASE`       | string                    | `default`                | 数据库名称                |
+| `EMBEDDING_MODEL_URL`      | string                    | `http://127.0.0.1:11434` | 嵌入模型地址              |
+| `EMBEDDING_MODEL_NAME`     | string                    | `auto`                   | 嵌入模型名称              |
+| `EMBEDDING_PROCTOL`        | `openai` / `ollama-embed` | `ollama-embed`           | 嵌入模型协议              |
+| `EMBEDDING_MODEL_API_KEY`  | string                    | (空)                     | 嵌入模型 API 密钥（可选） |
 
 ## 安装与使用
 
@@ -169,4 +170,3 @@ ruff check .
 # 类型检查
 pyright
 ```
-

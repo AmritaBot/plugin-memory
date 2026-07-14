@@ -65,6 +65,9 @@ class EnvConfig(BaseModel):
     embedding_proctol: Literal["openai", "ollama-embed"] = Field(
         default="ollama-embed", description="Embedding模型协议"
     )
+    embedding_model_api_key: str = Field(
+        default="", description="Embedding模型API密钥(可选，默认为空)"
+    )
 
 
 class DataManager(BaseDataManager[ConfigFile]):
@@ -79,7 +82,9 @@ async def setup():
 
 def build_preset() -> ModelPreset:
     return ModelPreset(
-        model=env_config.embedding_model_name, base_url=env_config.embedding_model_url
+        model=env_config.embedding_model_name,
+        base_url=env_config.embedding_model_url,
+        api_key=env_config.embedding_model_api_key,
     )
 
 

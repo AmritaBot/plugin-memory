@@ -183,7 +183,7 @@ LIST_MEMORY_FUN = FunctionDefinitionSchema(
 
 @on_tools(WRITE_MEMORY_FUN, custom_run=True, strict=True)
 async def w(ctx: ToolContext) -> str:
-    scope: str = ctx.data["scope"]
+    scope: str = ctx.data.get("scope", "user")
     try:
         partition_id = _resolve_scope_id(ctx, scope)
     except ValueError as e:
@@ -212,7 +212,7 @@ async def w(ctx: ToolContext) -> str:
 
 @on_tools(READ_MEMORY_FUN, custom_run=True, strict=True)
 async def r(ctx: ToolContext) -> str:
-    scope: str = ctx.data["scope"]
+    scope: str = ctx.data.get("scope", "user")
     try:
         partition_id = _resolve_scope_id(ctx, scope)
     except ValueError as e:
@@ -237,7 +237,7 @@ async def r(ctx: ToolContext) -> str:
 
 @on_tools(UPDATE_FUN, custom_run=True, strict=True)
 async def update_memory(ctx: ToolContext) -> str:
-    scope: str = ctx.data["scope"]
+    scope: str = ctx.data.get("scope", "user")
     try:
         partition_id = _resolve_scope_id(ctx, scope)
     except ValueError as e:
@@ -307,7 +307,7 @@ async def update_memory(ctx: ToolContext) -> str:
 
 @on_tools(DELETE_FUN, custom_run=True, strict=True)
 async def delete_memory(ctx: ToolContext) -> str:
-    scope: str = ctx.data["scope"]
+    scope: str = ctx.data.get("scope", "user")
     try:
         partition_id = _resolve_scope_id(ctx, scope)
     except ValueError as e:
@@ -337,7 +337,7 @@ async def delete_memory(ctx: ToolContext) -> str:
 
 @on_tools(LIST_MEMORY_FUN, custom_run=True, strict=True)
 async def list_memory(ctx: ToolContext) -> str:
-    scope: str = ctx.data["scope"]
+    scope: str = ctx.data.get("scope", "user")
     try:
         partition_id = _resolve_scope_id(ctx, scope)
     except ValueError as e:
