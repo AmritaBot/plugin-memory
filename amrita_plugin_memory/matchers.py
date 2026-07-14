@@ -37,61 +37,85 @@ async def _(
     await ope.init()
 
     if isinstance(event, GroupMessageEvent):
-        partitions = [
-            ("group", f"group_{event.group_id}"),
-            ("user", f"user_{event.user_id}"),
-        ]
+        available_scopes = {"group", "user"}
+        partitions = {
+            "group": f"group_{event.group_id}",
+            "user": f"user_{event.user_id}",
+        }
         role = event.sender.role if event.sender else "member"
     else:
-        partitions = [("user", f"user_{event.user_id}")]
+        available_scopes = {"user"}
+        partitions = {"user": f"user_{event.user_id}"}
         role = None
 
-    if sub == "" or sub == "list":
-        await _handle_list(matcher, ope, partitions)
-    elif sub == "search":
-        await _handle_search(matcher, ope, partitions, rest)
-    elif sub == "delete":
-        await _handle_delete(matcher, ope, partitions, role, rest)
+    # 解析子命令: /memory [scope] [action] [args...]
+    if sub in available_scopes:
+        scope = sub
+        action = rest.split(maxsplit=1)[0] if rest else ""
+        action_args = rest.split(maxsplit=1)[1] if rest and " " in rest else ""
+    elif sub in ("list", "search", "delete"):
+        # 老格式兼容 /memory list 等 → 默认以个人范围执行
+        scope = "user"
+        action = sub
+        action_args = rest
     else:
-        await matcher.finish(
+        scope = None
+        action = ""
+        action_args = ""
+
+    pid = partitions.get(scope) if scope else None
+
+    if scope and pid and action in ("", "list"):
+        await _handle_list(matcher, ope, pid, scope)
+    elif scope and pid and action == "search":
+        await _handle_search(matcher, ope, pid, scope, action_args)
+    elif scope and pid and action == "delete":
+        await _handle_delete(matcher, ope, pid, scope, role, action_args)
+    else:
+        hint = (
             "用法:\n"
-            "/memory           — 列出记忆\n"
-            "/memory search <关键词> — 搜索记忆\n"
-            "/memory delete <ID>    — 删除记忆"
+            "/memory user list           — 列出个人记忆\n"
+            "/memory user search <关键词> — 搜索个人记忆\n"
+            "/memory user delete <ID>    — 删除个人记忆"
         )
+        if "group" in available_scopes:
+            hint += (
+                "\n"
+                "/memory group list          — 列出群共享记忆\n"
+                "/memory group search <关键词> — 搜索群共享记忆\n"
+                "/memory group delete <ID>    — 删除群共享记忆(仅管理/群主)"
+            )
+        await matcher.finish(hint)
 
 
 async def _handle_list(
     matcher: Matcher,
     ope: AsyncUserMemory,
-    partitions: list[tuple[str, str]],
+    partition_id: str,
+    scope: str,
 ):
     try:
-        all_lines = ["📋 记忆列表:"]
-        total = 0
-        for scope, pid in partitions:
-            result = await ope.get_all_notes(pid, include=["metadatas", "documents"])
-            if not result or not result.get("ids"):
-                all_lines.append(f"  {_label(scope)}: (无)")
-                continue
+        result = await ope.get_all_notes(
+            partition_id, include=["metadatas", "documents"]
+        )
+        if not result or not result.get("ids"):
+            await matcher.finish(f"{_label(scope)} 暂无记忆")
 
-            ids = result["ids"]
-            documents = result.get("documents") or [""] * len(ids)
-            metadatas = result.get("metadatas") or [{}] * len(ids)
-            total += len(ids)
+        ids = result["ids"]
+        documents = result.get("documents") or [""] * len(ids)
+        metadatas = result.get("metadatas") or [{}] * len(ids)
 
-            all_lines.append(f"  {_label(scope)} ({len(ids)} 条):")
-            for i, doc_id in enumerate(ids):
-                meta = metadatas[i] if i < len(metadatas) else {}
-                doc = documents[i] if i < len(documents) else ""
-                preview = doc[:50] + "..." if len(doc) > 50 else doc
-                all_lines.append(
-                    f"    [{meta.get('importance', '-')}] {doc_id[:8]}… "
-                    f"{preview} | tag: {meta.get('tags', '-')}"
-                )
+        lines = [f"📋 {_label(scope)} 记忆列表（共 {len(ids)} 条）:"]
+        for i, doc_id in enumerate(ids):
+            meta = metadatas[i] if i < len(metadatas) else {}
+            doc = documents[i] if i < len(documents) else ""
+            preview = doc[:50] + "..." if len(doc) > 50 else doc
+            lines.append(
+                f"[{meta.get('importance', '-')}] {doc_id[:8]}… "
+                f"{preview} | tag: {meta.get('tags', '-')}"
+            )
 
-        all_lines[0] = f"📋 记忆列表（共 {total} 条）:"
-        await matcher.finish("\n".join(all_lines))
+        await matcher.finish("\n".join(lines))
     except Exception as e:
         await matcher.finish(f"列出记忆失败: {e}")
 
@@ -99,47 +123,41 @@ async def _handle_list(
 async def _handle_search(
     matcher: Matcher,
     ope: AsyncUserMemory,
-    partitions: list[tuple[str, str]],
+    partition_id: str,
+    scope: str,
     query: str,
 ):
     if not query:
-        await matcher.finish("请提供搜索关键词，例如: /memory search 喜欢什么")
+        await matcher.finish("请提供搜索关键词，例如: /memory user search 喜欢什么")
 
     try:
-        all_lines = [f"🔍 搜索「{query}」结果:"]
-        has_result = False
-        for scope, pid in partitions:
-            res = await ope.query_notes(pid, query, top_k=5)
-            if not res or not res.get("ids") or not res["ids"]:
-                continue
+        res = await ope.query_notes(partition_id, query, top_k=10)
+        if not res or not res.get("ids") or not res["ids"]:
+            await matcher.finish(f"{_label(scope)} 未找到与「{query}」相关的记忆")
 
-            flat_ids = res["ids"][0]
-            if not flat_ids:
-                continue
-            has_result = True
+        flat_ids = res["ids"][0]
+        if not flat_ids:
+            await matcher.finish(f"{_label(scope)} 未找到与「{query}」相关的记忆")
 
-            raw_docs = res.get("documents")
-            flat_docs = raw_docs[0] if raw_docs else []
-            raw_metas = res.get("metadatas")
-            flat_metas = raw_metas[0] if raw_metas else []
-            raw_dist = res.get("distances")
-            distances: list[float] = raw_dist[0] if raw_dist else []  # type: ignore[assignment]
+        raw_docs = res.get("documents")
+        flat_docs = raw_docs[0] if raw_docs else []
+        raw_metas = res.get("metadatas")
+        flat_metas = raw_metas[0] if raw_metas else []
+        raw_dist = res.get("distances")
+        distances: list[float] = raw_dist[0] if raw_dist else []  # type: ignore[assignment]
 
-            all_lines.append(f"  {_label(scope)}:")
-            for i, doc_id in enumerate(flat_ids):
-                meta = flat_metas[i] if i < len(flat_metas) else {}
-                doc = flat_docs[i] if i < len(flat_docs) else ""
-                dist = distances[i] if i < len(distances) else 0.0
-                preview = doc[:50] + "..." if len(doc) > 50 else doc
-                all_lines.append(
-                    f"    [{meta.get('importance', '-')}] {doc_id[:8]}… "
-                    f"{preview} | tag: {meta.get('tags', '-')} | score: {dist:.3f}"
-                )
+        lines = [f"🔍 {_label(scope)} 搜索「{query}」结果:"]
+        for i, doc_id in enumerate(flat_ids):
+            meta = flat_metas[i] if i < len(flat_metas) else {}
+            doc = flat_docs[i] if i < len(flat_docs) else ""
+            dist = distances[i] if i < len(distances) else 0.0
+            preview = doc[:50] + "..." if len(doc) > 50 else doc
+            lines.append(
+                f"[{meta.get('importance', '-')}] {doc_id[:8]}… "
+                f"{preview} | tag: {meta.get('tags', '-')} | score: {dist:.3f}"
+            )
 
-        if not has_result:
-            all_lines.append(f"  未找到与「{query}」相关的记忆")
-
-        await matcher.finish("\n".join(all_lines))
+        await matcher.finish("\n".join(lines))
     except Exception as e:
         await matcher.finish(f"搜索记忆失败: {e}")
 
@@ -147,24 +165,25 @@ async def _handle_search(
 async def _handle_delete(
     matcher: Matcher,
     ope: AsyncUserMemory,
-    partitions: list[tuple[str, str]],
+    partition_id: str,
+    scope: str,
     role: str | None,
     doc_id: str,
 ):
     if not doc_id:
         await matcher.finish("请提供要删除的记忆 ID")
 
-    # 先找到记忆属于哪个分区
-    for scope, pid in partitions:
-        result = await ope.get_all_notes(pid, include=["metadatas"])
-        if doc_id in (result.get("ids") or []):
-            # 群共享记忆只有 admin/owner 能删
-            if scope == "group" and role == "member":
-                await matcher.finish(
-                    f"❌ 无权删除群共享记忆（{_label(scope)}），仅管理员和群主可删除"
-                )
-            await ope.delete_note(pid, doc_id)
-            await matcher.finish(f"✅ 已删除 {_label(scope)} 记忆: {doc_id[:8]}…")
-            return
+    try:
+        result = await ope.get_all_notes(partition_id, include=["metadatas"])
+        if doc_id not in (result.get("ids") or []):
+            await matcher.finish(f"{_label(scope)} 未找到记忆: {doc_id}")
 
-    await matcher.finish(f"未找到记忆: {doc_id}")
+        if scope == "group" and role == "member":
+            await matcher.finish(
+                f"❌ 无权删除{_label(scope)}记忆，仅管理员和群主可删除"
+            )
+
+        await ope.delete_note(partition_id, doc_id)
+        await matcher.finish(f"✅ 已删除 {_label(scope)} 记忆: {doc_id[:8]}…")
+    except Exception as e:
+        await matcher.finish(f"删除记忆失败: {e}")
