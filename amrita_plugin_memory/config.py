@@ -85,6 +85,7 @@ def build_preset() -> ModelPreset:
         model=env_config.embedding_model_name,
         base_url=env_config.embedding_model_url,
         api_key=env_config.embedding_model_api_key,
+        protocol=env_config.embedding_proctol,
     )
 
 
