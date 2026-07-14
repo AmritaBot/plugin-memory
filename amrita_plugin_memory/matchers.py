@@ -3,6 +3,7 @@
 from amrita.plugins.menu.models import MatcherData
 from nonebot import on_command
 from nonebot.adapters.onebot.v11 import GroupMessageEvent, Message, MessageEvent
+from nonebot.exception import FinishedException
 from nonebot.matcher import Matcher
 from nonebot.params import CommandArg
 
@@ -116,6 +117,8 @@ async def _handle_list(
             )
 
         await matcher.finish("\n".join(lines))
+    except FinishedException:
+        return
     except Exception as e:
         await matcher.finish(f"列出记忆失败: {e}")
 
@@ -158,6 +161,8 @@ async def _handle_search(
             )
 
         await matcher.finish("\n".join(lines))
+    except FinishedException:
+        return
     except Exception as e:
         await matcher.finish(f"搜索记忆失败: {e}")
 
@@ -185,5 +190,7 @@ async def _handle_delete(
 
         await ope.delete_note(partition_id, doc_id)
         await matcher.finish(f"✅ 已删除 {_label(scope)} 记忆: {doc_id[:8]}…")
+    except FinishedException:
+        return
     except Exception as e:
         await matcher.finish(f"删除记忆失败: {e}")
