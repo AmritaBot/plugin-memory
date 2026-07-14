@@ -13,6 +13,7 @@ from amrita_core import (
 from chromadb import QueryResult
 from nonebot import logger
 from nonebot.adapters.onebot.v11 import Event as OB11Event
+from nonebot.adapters.onebot.v11 import GroupMessageEvent
 
 from .config import DataManager
 from .vector import AsyncUserMemory, MemoryMetadata, get_db_conn
@@ -30,16 +31,15 @@ def _resolve_scope_id(ctx: ToolContext, scope: str) -> str:
     """根据 scope 返回对应的分区 key
 
     - scope="group": 群共享记忆，返回 f"group_{group_id}"
-    - scope="user":  用户专属记忆，返回 event.get_session_id()
+    - scope="user":  用户专属记忆，返回 f"user_{user_id}"（群聊私聊互通）
     """
-    event = _get_event(ctx)
+    event: OB11Event = _get_event(ctx)
     if scope == "group":
-        group_id: int | None = getattr(event, "group_id", None)
-        if group_id is None:
+        if not isinstance(event, GroupMessageEvent):
             raise ValueError("当前不在群聊中，无法使用群共享记忆")
-        return f"group_{group_id}"
+        return f"group_{event.group_id}"
     elif scope == "user":
-        return event.get_session_id()
+        return f"user_{event.user_id}"  # type: ignore
     else:
         raise ValueError(f"无效的 scope: {scope}")
 
