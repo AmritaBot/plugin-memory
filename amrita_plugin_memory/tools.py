@@ -61,6 +61,14 @@ def _err(message: str) -> str:
     )
 
 
+def _check_required(ctx: ToolContext, tool_name: str, *params: str) -> str | None:
+    """校验必填参数，缺失时返回错误消息；全部通过返回 None"""
+    for p in params:
+        if p not in ctx.data or ctx.data[p] is None:
+            return _err(f"调用 {tool_name} 工具必须带有 {p} 参数")
+    return None
+
+
 #  公共参数：scope
 _SCOPE_PROP = FunctionPropertySchema(
     type="string",
@@ -183,7 +191,11 @@ LIST_MEMORY_FUN = FunctionDefinitionSchema(
 
 @on_tools(WRITE_MEMORY_FUN, custom_run=True, strict=True)
 async def w(ctx: ToolContext) -> str:
-    scope: str = ctx.data.get("scope", "user")
+    if err := _check_required(
+        ctx, "write_memory", "content", "tags", "importance", "scope"
+    ):
+        return err
+    scope: str = ctx.data["scope"]
     try:
         partition_id = _resolve_scope_id(ctx, scope)
     except ValueError as e:
@@ -205,14 +217,16 @@ async def w(ctx: ToolContext) -> str:
         scope=cast(Scope, scope),
     )
     await ope.add_note(partition_id, ctx.data["content"], metadata=meta)
-    dmp = meta.model_dump()
+    dmp = meta.model_dump(mode="json")
     dmp["status"] = "success"
     return json.dumps(dmp, ensure_ascii=False, indent=4)
 
 
 @on_tools(READ_MEMORY_FUN, custom_run=True, strict=True)
 async def r(ctx: ToolContext) -> str:
-    scope: str = ctx.data.get("scope", "user")
+    if err := _check_required(ctx, "read_memory", "query", "scope"):
+        return err
+    scope: str = ctx.data["scope"]
     try:
         partition_id = _resolve_scope_id(ctx, scope)
     except ValueError as e:
@@ -226,7 +240,7 @@ async def r(ctx: ToolContext) -> str:
         res: QueryResult = await ope.query_notes(
             partition_id,
             ctx.data["query"],
-            top_k=ctx.data["top_k"],
+            top_k=ctx.data.get("top_k", 5),
             importance=ctx.data.get("importance"),
         )
         return json.dumps(res, ensure_ascii=False, indent=4)
@@ -237,7 +251,9 @@ async def r(ctx: ToolContext) -> str:
 
 @on_tools(UPDATE_FUN, custom_run=True, strict=True)
 async def update_memory(ctx: ToolContext) -> str:
-    scope: str = ctx.data.get("scope", "user")
+    if err := _check_required(ctx, "update_memory", "id", "scope"):
+        return err
+    scope: str = ctx.data["scope"]
     try:
         partition_id = _resolve_scope_id(ctx, scope)
     except ValueError as e:
@@ -307,7 +323,9 @@ async def update_memory(ctx: ToolContext) -> str:
 
 @on_tools(DELETE_FUN, custom_run=True, strict=True)
 async def delete_memory(ctx: ToolContext) -> str:
-    scope: str = ctx.data.get("scope", "user")
+    if err := _check_required(ctx, "delete_memory", "id", "scope"):
+        return err
+    scope: str = ctx.data["scope"]
     try:
         partition_id = _resolve_scope_id(ctx, scope)
     except ValueError as e:
@@ -337,7 +355,9 @@ async def delete_memory(ctx: ToolContext) -> str:
 
 @on_tools(LIST_MEMORY_FUN, custom_run=True, strict=True)
 async def list_memory(ctx: ToolContext) -> str:
-    scope: str = ctx.data.get("scope", "user")
+    if err := _check_required(ctx, "list_memory", "scope"):
+        return err
+    scope: str = ctx.data["scope"]
     try:
         partition_id = _resolve_scope_id(ctx, scope)
     except ValueError as e:
