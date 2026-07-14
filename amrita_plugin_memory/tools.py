@@ -1,6 +1,6 @@
 import json
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal, cast
 
 from amrita.plugins.chat.runtime import AmritaBotContext
 from amrita_core import (
@@ -12,15 +12,36 @@ from amrita_core import (
 )
 from chromadb import QueryResult
 from nonebot import logger
+from nonebot.adapters.onebot.v11 import Event as OB11Event
 
 from .config import DataManager
 from .vector import AsyncUserMemory, MemoryMetadata, get_db_conn
 
+Scope = Literal["group", "user"]  # type alias
 
-def _get_session_id(ctx: ToolContext) -> str:
-    """从 ToolContext 中提取会话 ID"""
+
+def _get_event(ctx: ToolContext) -> OB11Event:
+    """从 ToolContext 中提取 OneBot V11 原始事件"""
     amrictx: AmritaBotContext = ctx.ctx.chat_object._hook_kwargs["amrita"]
-    return amrictx["event"].get_session_id()
+    return amrictx["event"]
+
+
+def _resolve_scope_id(ctx: ToolContext, scope: str) -> str:
+    """根据 scope 返回对应的分区 key
+
+    - scope="group": 群共享记忆，返回 f"group_{group_id}"
+    - scope="user":  用户专属记忆，返回 event.get_session_id()
+    """
+    event = _get_event(ctx)
+    if scope == "group":
+        group_id: int | None = getattr(event, "group_id", None)
+        if group_id is None:
+            raise ValueError("当前不在群聊中，无法使用群共享记忆")
+        return f"group_{group_id}"
+    elif scope == "user":
+        return event.get_session_id()
+    else:
+        raise ValueError(f"无效的 scope: {scope}")
 
 
 def _make_operator() -> AsyncUserMemory:
@@ -40,6 +61,18 @@ def _err(message: str) -> str:
     )
 
 
+#  公共参数：scope
+_SCOPE_PROP = FunctionPropertySchema(
+    type="string",
+    description=(
+        "记忆范围：`group`=群共享(群内所有人可见)，"
+        "`user`=个人专属(仅自己可见)。私聊中不可用`group`"
+    ),
+    enum=["group", "user"],
+)
+
+#  Function Schema 定义 ─
+
 WRITE_MEMORY_FUN = FunctionDefinitionSchema(
     name="write_memory",
     description="将当前用户(或群组)的重要信息存入长期记忆",
@@ -58,8 +91,9 @@ WRITE_MEMORY_FUN = FunctionDefinitionSchema(
                 description="重要性等级",
                 enum=["low", "medium", "high"],
             ),
+            "scope": _SCOPE_PROP,
         },
-        required=["content", "tags", "importance"],
+        required=["content", "tags", "importance", "scope"],
     ),
 )
 READ_MEMORY_FUN = FunctionDefinitionSchema(
@@ -81,8 +115,9 @@ READ_MEMORY_FUN = FunctionDefinitionSchema(
                 enum=["low", "medium", "high"],
                 nullable=True,
             ),
+            "scope": _SCOPE_PROP,
         },
-        required=["query"],
+        required=["query", "scope"],
     ),
 )
 
@@ -106,8 +141,9 @@ UPDATE_FUN = FunctionDefinitionSchema(
                 description="重要性等级（如不修改可不传）",
                 enum=["low", "medium", "high"],
             ),
+            "scope": _SCOPE_PROP,
         },
-        required=["id"],
+        required=["id", "scope"],
     ),
 )
 
@@ -118,9 +154,10 @@ DELETE_FUN = FunctionDefinitionSchema(
     parameters=FunctionParametersSchema(
         type="object",
         properties={
-            "id": FunctionPropertySchema(type="string", description="要删除的记忆ID")
+            "id": FunctionPropertySchema(type="string", description="要删除的记忆ID"),
+            "scope": _SCOPE_PROP,
         },
-        required=["id"],
+        required=["id", "scope"],
     ),
 )
 
@@ -134,30 +171,40 @@ LIST_MEMORY_FUN = FunctionDefinitionSchema(
             "limit": FunctionPropertySchema(
                 type="integer", description="返回数量，默认5条", default=5
             ),
+            "scope": _SCOPE_PROP,
         },
-        required=[],
+        required=["scope"],
     ),
 )
 
 
+#  Handler 实现 ─
+
+
 @on_tools(WRITE_MEMORY_FUN, custom_run=True, strict=True)
 async def w(ctx: ToolContext) -> str:
-    session_id = _get_session_id(ctx)
+    scope: str = ctx.data["scope"]
+    try:
+        partition_id = _resolve_scope_id(ctx, scope)
+    except ValueError as e:
+        return _err(str(e))
+
     ope = _make_operator()
     await ope.init()
     logger.debug("开始写入记忆...")
-    logger.debug(f"会话ID: {session_id}")
+    logger.debug(f"scope={scope}, partition_id={partition_id}")
     logger.debug(f"记忆Payload {ctx.data['content']}")
     if (
-        await ope.count_user_notes(session_id)
+        await ope.count_user_notes(partition_id)
         >= (await DataManager().safe_get_config()).per_session_memory_limit
     ):
         return _err("当前会话的记忆数量已超过限制，请清理后再试")
     meta = MemoryMetadata(
         importance=ctx.data["importance"],
         tags=ctx.data["tags"],
+        scope=cast(Scope, scope),
     )
-    await ope.add_note(session_id, ctx.data["content"], metadata=meta)
+    await ope.add_note(partition_id, ctx.data["content"], metadata=meta)
     dmp = meta.model_dump()
     dmp["status"] = "success"
     return json.dumps(dmp, ensure_ascii=False, indent=4)
@@ -165,14 +212,19 @@ async def w(ctx: ToolContext) -> str:
 
 @on_tools(READ_MEMORY_FUN, custom_run=True, strict=True)
 async def r(ctx: ToolContext) -> str:
-    session_id = _get_session_id(ctx)
+    scope: str = ctx.data["scope"]
+    try:
+        partition_id = _resolve_scope_id(ctx, scope)
+    except ValueError as e:
+        return _err(str(e))
+
     ope = _make_operator()
     await ope.init()
     logger.debug("开始检索记忆...")
-    logger.debug(f"会话ID: {session_id}")
+    logger.debug(f"scope={scope}, partition_id={partition_id}")
     try:
         res: QueryResult = await ope.query_notes(
-            session_id,
+            partition_id,
             ctx.data["query"],
             top_k=ctx.data["top_k"],
             importance=ctx.data.get("importance"),
@@ -185,26 +237,31 @@ async def r(ctx: ToolContext) -> str:
 
 @on_tools(UPDATE_FUN, custom_run=True, strict=True)
 async def update_memory(ctx: ToolContext) -> str:
-    session_id = _get_session_id(ctx)
+    scope: str = ctx.data["scope"]
+    try:
+        partition_id = _resolve_scope_id(ctx, scope)
+    except ValueError as e:
+        return _err(str(e))
+
     ope = _make_operator()
     await ope.init()
     logger.debug("开始更新记忆...")
-    logger.debug(f"会话ID: {session_id}")
+    logger.debug(f"scope={scope}, partition_id={partition_id}")
     logger.debug(f"更新记忆ID: {ctx.data['id']}")
 
     try:
-        result = await ope.get_all_notes(session_id, include=["metadatas", "documents"])
+        result = await ope.get_all_notes(
+            partition_id, include=["metadatas", "documents"]
+        )
         if not result or not result.get("ids"):
             return _err("未找到指定ID的记忆")
 
-        # 查找要更新的记忆
         ids = result["ids"]
         try:
             target_index = ids.index(ctx.data["id"])
         except ValueError:
             return _err("未找到指定ID的记忆")
 
-        # 获取现有数据
         documents = result.get("documents") or []
         metadatas = result.get("metadatas") or []
         existing_doc = documents[target_index] if target_index < len(documents) else ""
@@ -213,14 +270,12 @@ async def update_memory(ctx: ToolContext) -> str:
         if not existing_meta:
             return _err("记忆元数据损坏")
 
-        # 构建更新后的数据
         new_content = ctx.data.get("content", existing_doc)
         new_tags = ctx.data.get("tags", existing_meta.get("tags", ""))
         new_importance = ctx.data.get(
             "importance", existing_meta.get("importance", "medium")
         )
 
-        # 保留原始创建时间
         created_at_str = existing_meta.get("created_at", "")
         if isinstance(created_at_str, str):
             try:
@@ -230,14 +285,19 @@ async def update_memory(ctx: ToolContext) -> str:
         else:
             created_at = datetime.now()
 
-        # 使用原生 update，原子操作，不会丢失数据
         meta = MemoryMetadata(
             memory_id=ctx.data["id"],
             importance=new_importance,
             tags=new_tags,
+            scope=cast(
+                Scope,
+                existing_meta.get("scope", scope)
+                if isinstance(existing_meta.get("scope"), str)
+                else scope,
+            ),
             created_at=created_at,
         )
-        await ope.update_note(session_id, new_content, metadata=meta)
+        await ope.update_note(partition_id, new_content, metadata=meta)
 
         return _ok(message="记忆更新成功", id=ctx.data["id"])
     except Exception as e:
@@ -247,15 +307,20 @@ async def update_memory(ctx: ToolContext) -> str:
 
 @on_tools(DELETE_FUN, custom_run=True, strict=True)
 async def delete_memory(ctx: ToolContext) -> str:
-    session_id = _get_session_id(ctx)
+    scope: str = ctx.data["scope"]
+    try:
+        partition_id = _resolve_scope_id(ctx, scope)
+    except ValueError as e:
+        return _err(str(e))
+
     ope = _make_operator()
     await ope.init()
     logger.debug("开始删除记忆...")
-    logger.debug(f"会话ID: {session_id}")
+    logger.debug(f"scope={scope}, partition_id={partition_id}")
     logger.debug(f"删除记忆ID: {ctx.data['id']}")
 
     try:
-        result = await ope.get_all_notes(session_id, include=["metadatas"])
+        result = await ope.get_all_notes(partition_id, include=["metadatas"])
         if (
             not result
             or not result.get("ids")
@@ -263,7 +328,7 @@ async def delete_memory(ctx: ToolContext) -> str:
         ):
             return _err("未找到指定ID的记忆")
 
-        await ope.delete_note(session_id, ctx.data["id"])
+        await ope.delete_note(partition_id, ctx.data["id"])
         return _ok(message="记忆删除成功", id=ctx.data["id"])
     except Exception as e:
         logger.error(f"删除记忆时发生错误: {e}")
@@ -272,15 +337,22 @@ async def delete_memory(ctx: ToolContext) -> str:
 
 @on_tools(LIST_MEMORY_FUN, custom_run=True, strict=True)
 async def list_memory(ctx: ToolContext) -> str:
-    session_id = _get_session_id(ctx)
+    scope: str = ctx.data["scope"]
+    try:
+        partition_id = _resolve_scope_id(ctx, scope)
+    except ValueError as e:
+        return _err(str(e))
+
     ope = _make_operator()
     await ope.init()
     logger.debug("开始列出记忆...")
-    logger.debug(f"会话ID: {session_id}")
+    logger.debug(f"scope={scope}, partition_id={partition_id}")
 
     try:
         limit = ctx.data.get("limit", 5)
-        result = await ope.get_all_notes(session_id, include=["metadatas", "documents"])
+        result = await ope.get_all_notes(
+            partition_id, include=["metadatas", "documents"]
+        )
 
         if not result or not result.get("ids"):
             return _ok(memories=[], total=0)
@@ -299,6 +371,7 @@ async def list_memory(ctx: ToolContext) -> str:
             memories.append(
                 {
                     "id": doc_id,
+                    "scope": meta.get("scope", "user"),
                     "tags": meta.get("tags", ""),
                     "importance": meta.get("importance", "medium"),
                     "content_preview": doc[:50] + "..." if len(doc) > 50 else doc,

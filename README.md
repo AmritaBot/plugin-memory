@@ -27,11 +27,12 @@ amrita_plugin_memory/
 - **config.py**: 定义配置文件（过期天数、记忆上限）和环境变量（数据库类型、嵌入模型地址等），通过 Pydantic 模型校验。
 - **embed.py**: 实现 Ollama 协议的嵌入适配器，通过 HTTP API 调用 `/api/embed` 端点。
 - **vector.py**: 对 ChromaDB 原生 API 进行 `asyncio.to_thread` 封装，提供异步的集合管理与记忆 CRUD。使用 `aiologic.Lock` 按用户粒度加锁，保证并发安全。
-- **tools.py**: 定义 5 个 Function Calling 工具（`write_memory` / `read_memory` / `update_memory` / `delete_memory` / `list_memory`），注册到 Amrita 的工具系统中。
+- **tools.py**: 定义 5 个 Function Calling 工具（`write_memory` / `read_memory` / `update_memory` / `delete_memory` / `list_memory`），注册到 Amrita 的工具系统中。通过 `scope` 参数支持群共享记忆与用户专属记忆的分区隔离。
 
 ## 功能特点
 
 - **长期记忆存储**：将用户偏好、项目信息等持久化存入 ChromaDB 向量数据库
+- **群/用户记忆隔离**：LLM 可通过 `scope` 参数选择存入群共享记忆（群内所有人可见）或用户专属记忆（仅自己可见）
 - **语义检索**：基于嵌入向量的语义相似度检索，支持中英文关键词
 - **智能标签**：支持使用自定义标签对记忆进行分类（如 `preference`、`project`）
 - **重要性分级**：三级重要程度（`low` / `medium` / `high`），支持按级别过滤检索
@@ -50,6 +51,7 @@ amrita_plugin_memory/
 | `content` | string | ✅ | 记忆内容，简洁明了 |
 | `tags` | string | ✅ | 分类标签，如 `preference`、`project` |
 | `importance` | `"low"` / `"medium"` / `"high"` | ✅ | 重要性等级 |
+| `scope` | `"group"` / `"user"` | ✅ | `group`=群共享，`user`=个人专属（私聊不可用 `group`） |
 
 ### 2. `read_memory` —— 检索记忆
 
@@ -60,6 +62,7 @@ amrita_plugin_memory/
 | `query` | string | ✅ | — | 关键词字符串，空格分隔 |
 | `top_k` | integer | ❌ | `5` | 返回结果数量 |
 | `importance` | `"low"` / `"medium"` / `"high"` | ❌ | — | 按重要性过滤 |
+| `scope` | `"group"` / `"user"` | ✅ | — | 检索范围：群共享或个人专属 |
 
 ### 3. `update_memory` —— 更新记忆
 
@@ -68,6 +71,7 @@ amrita_plugin_memory/
 | 参数 | 类型 | 必需 | 描述 |
 |------|------|------|------|
 | `id` | string | ✅ | 要更新的记忆 ID |
+| `scope` | `"group"` / `"user"` | ✅ | 记忆所属范围 |
 | `content` | string | ❌ | 新的记忆内容 |
 | `tags` | string | ❌ | 新的标签 |
 | `importance` | `"low"` / `"medium"` / `"high"` | ❌ | 新的重要性等级 |
@@ -79,14 +83,16 @@ amrita_plugin_memory/
 | 参数 | 类型 | 必需 | 描述 |
 |------|------|------|------|
 | `id` | string | ✅ | 要删除的记忆 ID |
+| `scope` | `"group"` / `"user"` | ✅ | 记忆所属范围 |
 
 ### 5. `list_memory` —— 列出记忆
 
-列出当前用户的所有记忆（返回标签和 ID）。
+列出当前用户的所有记忆（返回 scope、标签和 ID）。
 
 | 参数 | 类型 | 必需 | 默认值 | 描述 |
 |------|------|------|--------|------|
 | `limit` | integer | ❌ | `5` | 返回数量限制 |
+| `scope` | `"group"` / `"user"` | ✅ | — | 列出范围：群共享或个人专属 |
 
 ## 配置选项
 

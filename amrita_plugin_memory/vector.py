@@ -309,6 +309,9 @@ class MemoryMetadata(BaseModel):
     )
     tags: str = Field(description="标签")
     importance: Literal["low", "medium", "high"] = Field(description="重要程度")
+    scope: Literal["group", "user"] = Field(
+        default="user", description="记忆范围：群共享(group)或个人专属(user)"
+    )
     created_at: datetime = Field(
         default_factory=lambda: datetime.now(utc), description="创建时间"
     )
@@ -358,6 +361,7 @@ class AsyncUserMemory:
                 ids=[metadata.memory_id],
                 metadatas=[
                     {
+                        "scope": metadata.scope,
                         "user_id": user_id,
                         "tags": metadata.tags,
                         "importance": metadata.importance,
@@ -382,6 +386,7 @@ class AsyncUserMemory:
                 ids=[metadata.memory_id],
                 metadatas=[
                     {
+                        "scope": metadata.scope,
                         "user_id": user_id,
                         "tags": metadata.tags,
                         "importance": metadata.importance,
