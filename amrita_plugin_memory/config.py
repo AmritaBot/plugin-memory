@@ -14,6 +14,8 @@ PLUGIN_IM = "amrita_plugin_memory"
 
 
 class ConfigFile(BaseModel):
+    """配置文件"""
+
     short_term_expiry_days: int = Field(
         default=3, description="短期记忆的过期天数，默认为3天"
     )
@@ -60,12 +62,13 @@ class EnvConfig(BaseModel):
         default="http://127.0.0.1:11434", description="Embedding模型地址"
     )
     embedding_model_name: str = Field(default="auto", description="Embedding模型名称")
-    embedding_proctol: Literal["openai-embed", "ollama-embed"] = Field(
+    embedding_proctol: Literal["openai", "ollama-embed"] = Field(
         default="ollama-embed", description="Embedding模型协议"
     )
 
 
 class DataManager(BaseDataManager[ConfigFile]):
+    _owner_name = PLUGIN_IM
     config: ConfigFile
 
 

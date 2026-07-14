@@ -7,7 +7,6 @@ from collections.abc import Awaitable, Callable, Sequence
 from datetime import datetime
 from functools import wraps
 from inspect import iscoroutinefunction
-from types import CoroutineType
 from typing import Any, Literal, TypeVar, overload
 from uuid import UUID
 
@@ -15,7 +14,7 @@ import aiologic
 import chromadb
 from amrita_core.libchat import call_embedding
 from amrita_core.types import EmbeddingChunk
-from amrita_core.weakcache import WeakValueLRUCache
+from amrita_sense.weakcache import WeakValueLRUCache
 from chromadb.api import ClientAPI
 from chromadb.api.collection_configuration import (
     CreateCollectionConfiguration,
@@ -53,14 +52,12 @@ def get_lock(collection: str, uid: str) -> aiologic.Lock:
 @overload
 def any_to_thread(
     func: Callable[..., Awaitable[T]], /, *args, **kwargs
-) -> CoroutineType[Any, Any, T]: ...
+) -> Awaitable[T]: ...
 @overload
-def any_to_thread(
-    func: Callable[..., T], /, *args, **kwargs
-) -> CoroutineType[Any, Any, T]: ...
+def any_to_thread(func: Callable[..., T], /, *args, **kwargs) -> Awaitable[T]: ...
 
 
-def any_to_thread(func: Callable[..., Awaitable[T] | T], /, *args, **kwargs):
+def any_to_thread(func: Callable[..., Awaitable[T] | T], /, *args, **kwargs) -> Any:
     if not callable(func):
         raise TypeError("func must be callable")
     if iscoroutinefunction(func):
@@ -358,6 +355,30 @@ class AsyncUserMemory:
                 raise RuntimeError("No embedding returned")
             await any_to_thread(
                 self._collection.add,
+                ids=[metadata.memory_id],
+                metadatas=[
+                    {
+                        "user_id": user_id,
+                        "tags": metadata.tags,
+                        "importance": metadata.importance,
+                        "created_at": metadata.created_at.isoformat(),
+                    }
+                ],
+                embeddings=[vector[0].embedding],
+                documents=[note_text],
+            )
+
+    @require_init
+    async def update_note(self, user_id: str, note_text: str, metadata: MemoryMetadata):
+        """更新指定记忆，使用 ChromaDB 原生 update 保证原子性"""
+        async with get_lock(self._collection_name, user_id):
+            vector: Sequence[EmbeddingChunk] = await call_embedding(
+                note_text, build_preset()
+            )
+            if len(vector) == 0:
+                raise RuntimeError("No embedding returned")
+            await any_to_thread(
+                self._collection.update,
                 ids=[metadata.memory_id],
                 metadatas=[
                     {
