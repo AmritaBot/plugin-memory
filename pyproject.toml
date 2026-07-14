@@ -1,7 +1,7 @@
 [project]
 name = "amrita_plugin_memory"
 description = "Amrita长期记忆插件"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
     "aiohttp>=3.13.3",
     "aiologic>=0.16.0",
