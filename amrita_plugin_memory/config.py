@@ -13,6 +13,64 @@ VECTOR_DB_PATH = DATA_PATH / "vector_db.chroma"
 PLUGIN_IM = "amrita_plugin_memory"
 
 
+class SubconsciousConfig(BaseModel):
+    """常驻推理循环（潜意识层）配置 — 实验性功能"""
+
+    enabled: bool = Field(default=False, description="是否启用常驻推理循环")
+    experimental: bool = Field(
+        default=True, description="实验性标注，启用时日志输出 [EXPERIMENTAL]"
+    )
+    target_user_id: str | None = Field(
+        default=None, description="目标用户ID（MVP仅支持单用户），为空则不启动"
+    )
+    allowed_tools: list[str] = Field(
+        default_factory=list,
+        description="额外可用工具名列表，从全局 ToolsManager 查找，不存在仅告警",
+    )
+    max_iterations: int = Field(
+        default=10, ge=1, le=50, description="单次推理最大 ReAct 循环步数"
+    )
+    loop_detect_threshold: int = Field(
+        default=3, ge=2, le=10, description="连续相同工具调用次数阈值，触发后注入提示"
+    )
+    initial_delay_seconds: int = Field(
+        default=60, ge=1, description="启动后首次触发延迟（秒）"
+    )
+    default_interval_seconds: int = Field(
+        default=600, ge=10, description="LLM 未返回时间时的默认间隔（秒）"
+    )
+    pause_on_user_chat: bool = Field(
+        default=True, description="目标用户聊天时是否暂停推理循环"
+    )
+    pause_wakeup_min_seconds: int = Field(
+        default=180, ge=10, description="用户聊天后唤醒的最小延迟（秒）"
+    )
+    pause_wakeup_max_seconds: int = Field(
+        default=480, ge=60, description="用户聊天后唤醒的最大延迟（秒）"
+    )
+    prompt_file: str = Field(
+        default="subconscious_prompt.txt",
+        description="系统提示词文件名，相对于 config/amrita_plugin_memory/",
+    )
+    enable_memory_compress: bool = Field(
+        default=True, description="是否在每次运行后压缩持久化摘要"
+    )
+    allow_send_to_user: bool = Field(
+        default=False, description="是否允许潜意识主动向用户发送消息"
+    )
+    memory_warn_threshold: int = Field(
+        default=100,
+        ge=10,
+        description="ChromaDB 记忆总量超过此值时，在 prompt 中注入压缩提示",
+    )
+    max_abstracts: int = Field(
+        default=5,
+        ge=1,
+        le=20,
+        description="保留最近 N 轮摘要的滑动窗口大小",
+    )
+
+
 class ConfigFile(BaseModel):
     """配置文件"""
 
@@ -27,6 +85,9 @@ class ConfigFile(BaseModel):
     )
     per_session_memory_limit: int = Field(
         default=50, description="每个会话的记忆数量限制，默认为50条"
+    )
+    subconscious: SubconsciousConfig = Field(
+        default_factory=SubconsciousConfig, description="常驻推理循环配置"
     )
 
 

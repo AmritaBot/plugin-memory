@@ -79,7 +79,7 @@ _SCOPE_PROP = FunctionPropertySchema(
     enum=["group", "user"],
 )
 
-#  Function Schema 定义 ─
+#  Function Schema 定义
 
 WRITE_MEMORY_FUN = FunctionDefinitionSchema(
     name="write_memory",
@@ -186,7 +186,7 @@ LIST_MEMORY_FUN = FunctionDefinitionSchema(
 )
 
 
-#  Handler 实现 ─
+#  Handler 实现
 
 
 @on_tools(WRITE_MEMORY_FUN, custom_run=True, strict=True)
