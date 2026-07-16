@@ -8,8 +8,7 @@ from amrita_core.components.react import (
     REACT_COUNTER,
     SINGLE_STRATEGY_CALL,
 )
-from amrita_core.enums import BuiltinName
-from amrita_sense import ALIAS, GOTO, NOP, WHILE, NodeCompose
+from amrita_sense import WHILE, NodeCompose
 
 from .nodes import LIMITING_MEMORY, STRATEGY_INIT
 
@@ -21,19 +20,15 @@ _workflow = None
 def build_workflow():
     global _workflow
     if _workflow is None:
-        wf: NodeCompose = (
+        wf: NodeCompose = (  # A simple ReAct
             LOAD_STATE
             >> JINJA2_RENDER
             >> LIMITING_MEMORY
             >> BUILD_MESSAGE
             >> STRATEGY_INIT
-            >> (
-                GOTO(BuiltinName.STRATEGY_EOF)
-                >> ALIAS(AGENT_ENTRY, BuiltinName.AGENT_STRATEGY)
-                >> WHILE(_single_call).ACTION(REACT_COUNTER)
-                >> AGENT_POST_PROCESS
-                >> ALIAS(NOP, BuiltinName.STRATEGY_EOF)
-            )
+            >> AGENT_ENTRY
+            >> WHILE(_single_call).ACTION(REACT_COUNTER)
+            >> AGENT_POST_PROCESS
         )
         _workflow = wf.render()
     return _workflow
