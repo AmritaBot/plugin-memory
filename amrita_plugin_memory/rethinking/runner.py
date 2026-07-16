@@ -30,6 +30,11 @@ from ..config import DATA_PATH, SubconsciousConfig
 from ..vector import AsyncUserMemory, get_db_conn
 from . import _state
 from .backend import SubconsciousBackend
+from .consts import (
+    DEFAULT_SUBCONSCIOUS_PROMPT,
+    ensure_prompt_file,
+    load_character_prompt,
+)
 from .workflow import build_workflow
 
 _REPO_UID = "amritabot_inner_thinker"
@@ -332,23 +337,21 @@ class SubconsciousRunner:
 
     async def _load_prompt(self) -> str:
         prompt_path = (self._prompt_dir / self._config.prompt_file).resolve()
-        if not prompt_path.exists():
-            logger.warning(f"[EXP Subconscious] Prompt not found: {prompt_path}")
-            return (
-                "你是用户的记忆管家。使用提供的工具检查、合并、更新和删除记忆。"
-                "完成后必须调用 subconscious_iter_stop。"
-            )
+        ensure_prompt_file(prompt_path, DEFAULT_SUBCONSCIOUS_PROMPT)
+
+        # 加载 Bot 角色设定（从 PromptStore 的 private_prompts）
+        character_prompt = await load_character_prompt()
+
         template = Template(prompt_path.read_text(encoding="utf-8"))
         now = datetime.now(timezone.utc)
         prompt = await asyncio.to_thread(
             template.render,
             last_abstracts=self._last_abstracts,
-            last_run=(
-                self._last_abstracts[-1] if self._last_abstracts else ""
-            ),  # 兼容旧模板
+            last_run=(self._last_abstracts[-1] if self._last_abstracts else ""),
             current_time=now.strftime("%Y-%m-%d %H:%M:%S UTC"),
             target_user_id=self._config.target_user_id or "(未配置)",
             total_runs=self._total_runs,
+            character_prompt=character_prompt,
         )
 
         # Phase 3: 膨胀感知 — 查 ChromaDB 总量，超阈值注入警告
@@ -376,3 +379,5 @@ class SubconsciousRunner:
             logger.debug(f"[EXP Subconscious] Memory stats query failed: {e}")
 
         return prompt
+
+    #  持久化 helpers — 现在由 _save_to_repo 统一处理

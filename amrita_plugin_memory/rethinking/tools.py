@@ -16,6 +16,7 @@ from nonebot import logger
 
 from ..vector import AsyncUserMemory, MemoryMetadata, get_db_conn
 from . import _state
+from .consts import DEFAULT_SEND_PROMPT, ensure_prompt_file, load_character_prompt
 from .schemas import (
     DELETE_MEMORY_SCHEMA,
     DUPLICATE_HELPER_SCHEMA,
@@ -281,16 +282,16 @@ async def _generate_send_content(intent: str, memory_context: str) -> str:
     if runner is None:
         raise RuntimeError("Runner not initialized")
     prompt_path = (runner._prompt_dir / "subconscious_send_prompt.txt").resolve()
-    if prompt_path.exists():
-        template: Template = Template(prompt_path.read_text(encoding="utf-8"))
-        system_content: str = await asyncio.to_thread(
-            template.render,
-            intent=intent,
-            memory_context=memory_context,
-            current_time=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
-        )
-    else:
-        system_content = "你是用户的AI助手。请用自然的日常语气对用户说一句话。不要暴露你是'后台进程'。"
+    ensure_prompt_file(prompt_path, DEFAULT_SEND_PROMPT)
+    character_prompt = await load_character_prompt()
+    template: Template = Template(prompt_path.read_text(encoding="utf-8"))
+    system_content: str = await asyncio.to_thread(
+        template.render,
+        intent=intent,
+        memory_context=memory_context,
+        current_time=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
+        character_prompt=character_prompt,
+    )
     preset = PresetManager().get_default_preset()
     messages: CONTENT_LIST_TYPE = [
         Message(role="system", content=system_content),
