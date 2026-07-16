@@ -1,7 +1,7 @@
 [project]
 name = "amrita_plugin_memory"
 description = "Amrita长期记忆插件"
-version = "0.2.2"
+version = "0.2.2.post1"
 dependencies = [
     "aiohttp>=3.13.3",
     "aiologic>=0.16.0",
@@ -22,7 +22,7 @@ plugins = [
 plugin_dirs = []
 
 [tool.setuptools.packages.find]
-include = ["amrita_plugin_memory"]
+include = ["amrita_plugin_memory", "amrita_plugin_memory.*"]
 
 [[tool.nonebot.adapters]]
 name = "OneBot V11"
