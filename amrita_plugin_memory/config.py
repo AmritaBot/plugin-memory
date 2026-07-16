@@ -20,8 +20,8 @@ class SubconsciousConfig(BaseModel):
     experimental: bool = Field(
         default=True, description="实验性标注，启用时日志输出 [EXPERIMENTAL]"
     )
-    target_user_id: str | None = Field(
-        default=None, description="目标用户ID（MVP仅支持单用户），为空则不启动"
+    target_user_id: str = Field(
+        default="", description="目标用户ID（MVP仅支持单用户），为空则不启动"
     )
     allowed_tools: list[str] = Field(
         default_factory=list,

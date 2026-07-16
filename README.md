@@ -136,7 +136,7 @@ per_session_memory_limit = 50
 [subconscious]
 enabled = false               # 是否启用
 experimental = true           # 实验性标注
-target_user_id = ""           # 目标用户 ID（必填）
+target_user_id = ""           # 目标用户 ID（为空则不启用）
 allowed_tools = []            # 额外可用工具
 max_iterations = 10           # 单轮 ReAct 最大步数
 loop_detect_threshold = 3     # 连续同工具触发警告阈值
@@ -158,21 +158,23 @@ max_abstracts = 5             # 摘要滑动窗口大小
 
 **`subconscious_prompt.txt`** — Agent 系统提示词（由 `prompt_file` 配置指定）
 
-| 模板变量           | 说明                               |
-| ------------------ | ---------------------------------- |
-| `{{ last_run }}`   | 上一轮 MemoryLimiter 产出的摘要     |
-| `{{ last_abstracts }}` | 最近 N 轮摘要列表（max_abstracts 控制） |
-| `{{ current_time }}`   | 当前 UTC 时间                    |
-| `{{ target_user_id }}` | 目标用户 ID                      |
-| `{{ total_runs }}`     | 累计运行轮数                     |
+| 模板变量                 | 说明                                 |
+| ------------------------ | ------------------------------------ |
+| `{{ character_prompt }}` | Bot 当前角色设定（从 `config/chat/private_prompts/` 读取） |
+| `{{ last_run }}`         | 上一轮 MemoryLimiter 产出的摘要      |
+| `{{ last_abstracts }}`   | 最近 N 轮摘要列表（max_abstracts 控制） |
+| `{{ current_time }}`     | 当前 UTC 时间                        |
+| `{{ target_user_id }}`   | 目标用户 ID                          |
+| `{{ total_runs }}`       | 累计运行轮数                         |
 
 **`subconscious_send_prompt.txt`** — 主动消息生成模板
 
-| 模板变量               | 说明                 |
-| ---------------------- | -------------------- |
-| `{{ intent }}`         | LLM 指定的消息意图    |
-| `{{ memory_context }}` | 关联的记忆上下文      |
-| `{{ current_time }}`   | 当前 UTC 时间         |
+| 模板变量                 | 说明                                 |
+| ------------------------ | ------------------------------------ |
+| `{{ character_prompt }}` | Bot 当前角色设定                      |
+| `{{ intent }}`           | LLM 指定的消息意图                    |
+| `{{ memory_context }}`   | 关联的记忆上下文                      |
+| `{{ current_time }}`     | 当前 UTC 时间                        |
 
 ### 环境变量（`.env`）
 

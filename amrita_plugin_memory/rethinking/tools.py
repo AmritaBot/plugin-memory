@@ -39,7 +39,7 @@ def _make_operator() -> AsyncUserMemory:
 
 def _get_partition_id() -> str:
     uid = _state.get_target_user_id()
-    if uid is None:
+    if not uid:
         raise RuntimeError("target_user_id not configured")
     return f"user_{uid}"
 
@@ -247,7 +247,7 @@ async def subconscious_send_to_user(data: dict[str, Any]) -> str:
 @on_tools(READ_CHAT_CONTEXT_SCHEMA, strict=True)
 async def subconscious_read_chat_context(data: dict[str, Any]) -> str:
     uid_str = _state.get_target_user_id()
-    if uid_str is None:
+    if not uid_str:
         return _tools_err("target_user_id not configured")
     try:
         user_id = int(uid_str)
