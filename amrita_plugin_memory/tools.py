@@ -245,7 +245,9 @@ async def r(ctx: ToolContext) -> str:
         )
         return json.dumps(res, ensure_ascii=False, indent=4)
     except Exception as e:
-        logger.error(f"检索记忆时发生错误: {e}")
+        logger.opt(exception=e, colors=True, raw=True).exception(
+            f"检索记忆时发生错误: {e}"
+        )
         return _err(f"检索记忆失败: {e!s}")
 
 
@@ -317,7 +319,9 @@ async def update_memory(ctx: ToolContext) -> str:
 
         return _ok(message="记忆更新成功", id=ctx.data["id"])
     except Exception as e:
-        logger.error(f"更新记忆时发生错误: {e}")
+        logger.opt(exception=e, colors=True, raw=True).exception(
+            f"更新记忆时发生错误: {e}"
+        )
         return _err(f"更新记忆失败: {e!s}")
 
 
@@ -349,7 +353,9 @@ async def delete_memory(ctx: ToolContext) -> str:
         await ope.delete_note(partition_id, ctx.data["id"])
         return _ok(message="记忆删除成功", id=ctx.data["id"])
     except Exception as e:
-        logger.error(f"删除记忆时发生错误: {e}")
+        logger.opt(exception=e, colors=True, raw=True).exception(
+            f"删除记忆时发生错误: {e}"
+        )
         return _err(f"删除记忆失败: {e!s}")
 
 
@@ -400,5 +406,7 @@ async def list_memory(ctx: ToolContext) -> str:
 
         return _ok(memories=memories, total=len(ids))
     except Exception as e:
-        logger.error(f"列出记忆时发生错误: {e}")
+        logger.opt(exception=e, colors=True, raw=True).exception(
+            f"列出记忆时发生错误: {e}"
+        )
         return _err(f"列出记忆失败: {e!s}")

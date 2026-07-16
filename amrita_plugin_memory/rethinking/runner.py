@@ -170,7 +170,9 @@ class SubconsciousRunner:
             chat_obj.begin()
             await chat_obj
         except Exception as e:
-            logger.error(f"[EXP Subconscious] Error: {e}", exc_info=True)
+            logger.opt(exception=e, colors=True, raw=True).exception(
+                f"[EXP Subconscious] Error: {e}"
+            )
         finally:
             self._chat_obj = None
             self._is_running = False
@@ -314,7 +316,9 @@ class SubconsciousRunner:
             )
             await repo.update_memory_data(mem)
         except Exception as e:
-            logger.error(f"[EXP Subconscious] Save to repo failed: {e}")
+            logger.opt(exception=e, colors=True, raw=True).exception(
+                f"[EXP Subconscious] Save to repo failed: {e}"
+            )
 
     async def _save_pending_to_repo(self) -> None:
         """持久化待发送消息到 CachedUserDataRepository 的 extra_prompt 中。"""
@@ -331,7 +335,9 @@ class SubconsciousRunner:
             mem.extra_prompt = json.dumps(existing, ensure_ascii=False)
             await repo.update_memory_data(mem)
         except Exception as e:
-            logger.error(f"[EXP Subconscious] Save pending failed: {e}")
+            logger.opt(exception=e, colors=True, raw=True).exception(
+                f"[EXP Subconscious] Save pending failed: {e}"
+            )
 
     #  Prompt 加载
 

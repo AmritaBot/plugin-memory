@@ -81,7 +81,9 @@ async def subconscious_read_memory(data: dict[str, Any]) -> str:
         )
         return json.dumps(result, ensure_ascii=False, indent=2, default=str)
     except Exception as e:
-        logger.error(f"subconscious_read_memory error: {e}")
+        logger.opt(exception=e, colors=True, raw=True).exception(
+            f"subconscious_read_memory error: {e}"
+        )
         return _tools_err(str(e))
 
 
@@ -99,7 +101,9 @@ async def subconscious_write_memory(data: dict[str, Any]) -> str:
         await ope.add_note(pid, str(data["content"]), metadata=meta)
         return _tools_ok(id=meta.memory_id)
     except Exception as e:
-        logger.error(f"subconscious_write_memory error: {e}")
+        logger.opt(exception=e, colors=True, raw=True).exception(
+            f"subconscious_write_memory error: {e}"
+        )
         return _tools_err(str(e))
 
 
@@ -146,7 +150,9 @@ async def subconscious_update_memory(data: dict[str, Any]) -> str:
         await ope.update_note(pid, new_content, metadata=meta)
         return _tools_ok(message="记忆更新成功", id=mem_id)
     except Exception as e:
-        logger.error(f"subconscious_update_memory error: {e}")
+        logger.opt(exception=e, colors=True, raw=True).exception(
+            f"subconscious_update_memory error: {e}"
+        )
         return _tools_err(str(e))
 
 
@@ -166,7 +172,9 @@ async def subconscious_delete_memory(data: dict[str, Any]) -> str:
         await ope.delete_note(pid, mem_id)
         return _tools_ok(message="记忆删除成功", id=mem_id)
     except Exception as e:
-        logger.error(f"subconscious_delete_memory error: {e}")
+        logger.opt(exception=e, colors=True, raw=True).exception(
+            f"subconscious_delete_memory error: {e}"
+        )
         return _tools_err(str(e))
 
 
@@ -203,7 +211,9 @@ async def subconscious_list_memory(data: dict[str, Any]) -> str:
             )
         return _tools_ok(memories=memories, total=len(ids))
     except Exception as e:
-        logger.error(f"subconscious_list_memory error: {e}")
+        logger.opt(exception=e, colors=True, raw=True).exception(
+            f"subconscious_list_memory error: {e}"
+        )
         return _tools_err(str(e))
 
 
@@ -236,7 +246,9 @@ async def subconscious_send_to_user(data: dict[str, Any]) -> str:
     try:
         content = await _generate_send_content(intent, memory_context)
     except Exception as e:
-        logger.error(f"[EXP Subconscious] Generate send content failed: {e}")
+        logger.opt(exception=e, colors=True, raw=True).exception(
+            f"[EXP Subconscious] Generate send content failed: {e}"
+        )
         return _tools_err(str(e))
     ts = datetime.now(timezone.utc).isoformat()
     pending = _state.get_pending()
@@ -272,7 +284,9 @@ async def subconscious_read_chat_context(data: dict[str, Any]) -> str:
             indent=2,
         )
     except Exception as e:
-        logger.error(f"subconscious_read_chat_context error: {e}")
+        logger.opt(exception=e, colors=True, raw=True).exception(
+            f"subconscious_read_chat_context error: {e}"
+        )
         return _tools_err(str(e))
 
 
@@ -386,7 +400,9 @@ async def subconscious_duplicate_helper(data: dict[str, Any]) -> str:
             memories=items,
         )
     except Exception as e:
-        logger.error(f"subconscious_duplicate_helper error: {e}")
+        logger.opt(exception=e, colors=True, raw=True).exception(
+            f"subconscious_duplicate_helper error: {e}"
+        )
         return _tools_err(str(e))
 
 
@@ -444,5 +460,7 @@ async def subconscious_get_memory_stats(data: dict[str, Any]) -> str:
             avg_length=total_length // len(ids) if ids else 0,
         )
     except Exception as e:
-        logger.error(f"subconscious_get_memory_stats error: {e}")
+        logger.opt(exception=e, colors=True, raw=True).exception(
+            f"subconscious_get_memory_stats error: {e}"
+        )
         return _tools_err(str(e))
