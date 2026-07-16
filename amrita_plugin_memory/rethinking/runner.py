@@ -12,6 +12,7 @@ from typing import Any
 from amrita.plugins.chat.utils.app import CachedUserDataRepository
 from amrita.plugins.chat.utils.libchat import add_usage
 from amrita.plugins.chat.utils.sql import InsightsModel
+from amrita_core import SuspendObjectStream
 from amrita_core.base.backend import BackendSlots
 from amrita_core.builtins.agent import ReActAgentStrategy
 from amrita_core.chatmanager import ChatObject
@@ -20,7 +21,6 @@ from amrita_core.preset import ModelPreset
 from amrita_core.types import Message, UniResponseUsage
 from amrita_core.utils import gather_usage
 from amrita_sense import WorkflowInterpreter
-from amrita_sense.exceptions import InterruptKeepContext
 from amrita_sense.runtime.types import InterpreterContext
 from jinja2 import Template
 from nonebot import logger
@@ -38,6 +38,9 @@ from .consts import (
 from .workflow import build_workflow
 
 _REPO_UID = "user_00000000"
+
+
+async def _ign_cb(*_, **__): ...
 
 
 class SubconsciousRunner:
@@ -133,6 +136,8 @@ class SubconsciousRunner:
         train = Message(role="system", content=prompt_text)
         user_input = user_msg_text
 
+        io_stream = SuspendObjectStream(callback=_ign_cb)
+
         chat_obj = ChatObject(
             train=train,
             user_input=user_input,
@@ -141,7 +146,7 @@ class SubconsciousRunner:
             backend=BackendSlots(self._backend, self._backend),
             config=get_config(),
             agent_strategy=ReActAgentStrategy,
-            exception_ignored=(InterruptKeepContext,),
+            io_stream=io_stream,
         )
         self._chat_obj = chat_obj
 
@@ -152,7 +157,6 @@ class SubconsciousRunner:
             chat_obj.io_stream,
             extra_args=chat_obj._interpreter._ava_args[1:],
             extra_kwargs=chat_obj._interpreter._ava_kwargs,
-            exception_ignored=chat_obj._interpreter._exc_ignored,
         )
 
         if self._saved_dump is not None:
