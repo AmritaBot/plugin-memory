@@ -37,7 +37,7 @@ from .consts import (
 )
 from .workflow import build_workflow
 
-_REPO_UID = "amritabot_inner_thinker"
+_REPO_UID = "user_00000000"
 
 
 class SubconsciousRunner:
@@ -45,7 +45,7 @@ class SubconsciousRunner:
 
     使用 ChatObject 作为数据容器 + 标准 Agent 框架（ReActAgentStrategy）。
     LIMITING_MEMORY 节点在 Agent Loop 之前运行 MemoryLimiter 压缩会话消息。
-    持久化使用 CachedUserDataRepository（uid=amritabot_inner_thinker）。
+    持久化使用 CachedUserDataRepository（uid=user_00000000）。
     """
 
     def __init__(self, config: SubconsciousConfig) -> None:

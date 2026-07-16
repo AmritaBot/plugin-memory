@@ -32,7 +32,7 @@ flowchart TB
     end
 
     Surface -.->|"共享 ChromaDB"| Subconscious
-    Runner -->|"持久化状态"| CachedRepo["CachedUserDataRepository<br/>uid=amritabot_inner_thinker"]
+    Runner -->|"持久化状态"| CachedRepo["CachedUserDataRepository<br/>uid=user_00000000"]
     Runner -->|"usage 统计"| Insights["InsightsModel<br/>全局 Token 统计"]
 ```
 
@@ -57,7 +57,7 @@ LOAD_STATE → JINJA2_RENDER → LIMITING_MEMORY → BUILD_MESSAGE → STRATEGY_
 | 向量数据库 | ChromaDB（PersistentClient / HttpClient）                 |
 | 嵌入模型   | OpenAI Embedding / Ollama Embedding                       |
 | 调度引擎   | nonebot_plugin_apscheduler                                |
-| 持久化     | CachedUserDataRepository（uid=`amritabot_inner_thinker`） |
+| 持久化     | CachedUserDataRepository（uid=`user_00000000`） |
 | Token 统计 | InsightsModel（复用 Bot 全局 usage 统计）                 |
 | 配置管理   | Pydantic + TOML                                           |
 | 代码质量   | Ruff + Pyright                                            |
