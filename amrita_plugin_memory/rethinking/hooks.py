@@ -5,7 +5,6 @@ from nonebot import get_driver, logger
 
 from ..config import DataManager
 from . import _state
-from .runner import SubconsciousRunner
 
 
 async def _setup_subconscious_hook() -> None:
@@ -53,6 +52,8 @@ async def _setup_subconscious_hook() -> None:
 
 @get_driver().on_startup
 async def _subconscious_startup() -> None:
+    from .runner import SubconsciousRunner  # lazy to avoid circular import
+
     cfg = (await DataManager().safe_get_config()).subconscious
     if not cfg.enabled or not cfg.target_user_id:
         logger.debug("[EXP Subconscious] Not enabled or no target user, skip")

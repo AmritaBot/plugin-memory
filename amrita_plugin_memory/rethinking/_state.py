@@ -4,11 +4,15 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from amrita_core.tools.manager import MultiToolsManager
+
 if TYPE_CHECKING:
     from .runner import SubconsciousRunner
 
 _runner: SubconsciousRunner | None = None
 _pending_messages: list[dict[str, Any]] = []
+# 隔离的工具管理器 — 所有 @on_tools 装饰器通过 bound_to 注册到这里，不污染全局 ToolsManager
+_SUBCONSCIOUS_TOOLS = MultiToolsManager()
 
 
 def get_runner() -> SubconsciousRunner | None:
@@ -31,3 +35,7 @@ def get_pending() -> list[dict[str, Any]]:
 def set_pending(msgs: list[dict[str, Any]]) -> None:
     global _pending_messages
     _pending_messages = msgs
+
+
+def get_tools_manager() -> MultiToolsManager:
+    return _SUBCONSCIOUS_TOOLS

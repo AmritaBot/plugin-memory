@@ -13,7 +13,11 @@ from amrita_core.types import MemoryModel
 from nonebot import logger
 
 from ..config import SubconsciousConfig
-from .schemas import _SUBCONSCIOUS_TOOL_FUNCTIONS
+from . import _state
+
+
+def _get_global_tools() -> ToolsManager:
+    return ToolsManager()
 
 
 class SubconsciousBackend(AbilityBackend, MemoryBackend):
@@ -32,27 +36,18 @@ class SubconsciousBackend(AbilityBackend, MemoryBackend):
     def __init__(self, config: SubconsciousConfig):
         if not hasattr(self, "_tools_manager"):
             self._config = config
-            self._tools_manager = MultiToolsManager()
             self._presets = MultiPresetManager()
             self._memory = MemoryModel()
             self._register_tools()
 
     def _register_tools(self) -> None:
-        tm = ToolsManager()
-        for schema in _SUBCONSCIOUS_TOOL_FUNCTIONS:
-            if (td := tm.get_tool(schema.function.name)) is not None:
-                self._tools_manager.register_tool(td)
-        if self._config.allow_send_to_user:
-            if (td := tm.get_tool("subconscious_send_to_user")) is not None:
-                self._tools_manager.register_tool(td)
-        if (td := tm.get_tool("subconscious_read_chat_context")) is not None:
-            self._tools_manager.register_tool(td)
-        if (td := tm.get_tool("subconscious_duplicate_helper")) is not None:
-            self._tools_manager.register_tool(td)
-        if (td := tm.get_tool("subconscious_get_memory_stats")) is not None:
-            self._tools_manager.register_tool(td)
+        # 所有工具已通过 @on_tools(bound_to=_state.get_tools_manager()) 注册到隔离的 MultiToolsManager
+        # 这里只需拉取它们的 ToolData 用于 debug 校验
+        self._tools_manager = _state.get_tools_manager()
+        # allowed_tools 从全局 ToolsManager 拉取额外工具
+        gm = _get_global_tools()
         for tool_name in self._config.allowed_tools:
-            if (td := tm.get_tool(tool_name)) is not None:
+            if (td := gm.get_tool(tool_name)) is not None:
                 self._tools_manager.register_tool(td)
             else:
                 logger.warning(f"[EXP Subconscious] Tool '{tool_name}' not found")

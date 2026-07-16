@@ -30,6 +30,8 @@ from .schemas import (
     WRITE_MEMORY_SCHEMA,
 )
 
+_SUBCONSCIOUS_TOOLS = _state.get_tools_manager()
+
 #  辅助
 
 
@@ -57,7 +59,7 @@ def _tools_ok(**extra: Any) -> str:
 #  Handler
 
 
-@on_tools(READ_MEMORY_SCHEMA, strict=True)
+@on_tools(READ_MEMORY_SCHEMA, strict=True, bound_to=_SUBCONSCIOUS_TOOLS)
 async def subconscious_read_memory(data: dict[str, Any]) -> str:
     ope = _make_operator()
     await ope.init()
@@ -83,7 +85,7 @@ async def subconscious_read_memory(data: dict[str, Any]) -> str:
         return _tools_err(str(e))
 
 
-@on_tools(WRITE_MEMORY_SCHEMA, strict=True)
+@on_tools(WRITE_MEMORY_SCHEMA, strict=True, bound_to=_SUBCONSCIOUS_TOOLS)
 async def subconscious_write_memory(data: dict[str, Any]) -> str:
     ope = _make_operator()
     await ope.init()
@@ -101,7 +103,7 @@ async def subconscious_write_memory(data: dict[str, Any]) -> str:
         return _tools_err(str(e))
 
 
-@on_tools(UPDATE_MEMORY_SCHEMA, strict=True)
+@on_tools(UPDATE_MEMORY_SCHEMA, strict=True, bound_to=_SUBCONSCIOUS_TOOLS)
 async def subconscious_update_memory(data: dict[str, Any]) -> str:
     ope = _make_operator()
     await ope.init()
@@ -148,7 +150,7 @@ async def subconscious_update_memory(data: dict[str, Any]) -> str:
         return _tools_err(str(e))
 
 
-@on_tools(DELETE_MEMORY_SCHEMA, strict=True)
+@on_tools(DELETE_MEMORY_SCHEMA, strict=True, bound_to=_SUBCONSCIOUS_TOOLS)
 async def subconscious_delete_memory(data: dict[str, Any]) -> str:
     ope = _make_operator()
     await ope.init()
@@ -168,7 +170,7 @@ async def subconscious_delete_memory(data: dict[str, Any]) -> str:
         return _tools_err(str(e))
 
 
-@on_tools(LIST_MEMORY_SCHEMA, strict=True)
+@on_tools(LIST_MEMORY_SCHEMA, strict=True, bound_to=_SUBCONSCIOUS_TOOLS)
 async def subconscious_list_memory(data: dict[str, Any]) -> str:
     ope = _make_operator()
     await ope.init()
@@ -205,7 +207,7 @@ async def subconscious_list_memory(data: dict[str, Any]) -> str:
         return _tools_err(str(e))
 
 
-@on_tools(ITER_STOP_SCHEMA, strict=True)
+@on_tools(ITER_STOP_SCHEMA, strict=True, bound_to=_SUBCONSCIOUS_TOOLS)
 async def subconscious_iter_stop(data: dict[str, Any]) -> str:
     runner = _state.get_runner()
     if runner is not None:
@@ -222,7 +224,7 @@ async def subconscious_iter_stop(data: dict[str, Any]) -> str:
     )
 
 
-@on_tools(SEND_TO_USER_SCHEMA)
+@on_tools(SEND_TO_USER_SCHEMA, bound_to=_SUBCONSCIOUS_TOOLS)
 async def subconscious_send_to_user(data: dict[str, Any]) -> str:
     runner = _state.get_runner()
     if runner is None or not runner._config.allow_send_to_user:
@@ -244,7 +246,7 @@ async def subconscious_send_to_user(data: dict[str, Any]) -> str:
     return _tools_ok(status="queued", content=content, timestamp=ts)
 
 
-@on_tools(READ_CHAT_CONTEXT_SCHEMA, strict=True)
+@on_tools(READ_CHAT_CONTEXT_SCHEMA, strict=True, bound_to=_SUBCONSCIOUS_TOOLS)
 async def subconscious_read_chat_context(data: dict[str, Any]) -> str:
     uid_str = _state.get_target_user_id()
     if not uid_str:
@@ -308,7 +310,7 @@ async def _generate_send_content(intent: str, memory_context: str) -> str:
 #  压缩辅助工具
 
 
-@on_tools(DUPLICATE_HELPER_SCHEMA, strict=True)
+@on_tools(DUPLICATE_HELPER_SCHEMA, strict=True, bound_to=_SUBCONSCIOUS_TOOLS)
 async def subconscious_duplicate_helper(data: dict[str, Any]) -> str:
     """返回指定范围内全部记忆 + LLM 合并指导 prompt。
 
@@ -388,7 +390,7 @@ async def subconscious_duplicate_helper(data: dict[str, Any]) -> str:
         return _tools_err(str(e))
 
 
-@on_tools(GET_MEMORY_STATS_SCHEMA, strict=True)
+@on_tools(GET_MEMORY_STATS_SCHEMA, strict=True, bound_to=_SUBCONSCIOUS_TOOLS)
 async def subconscious_get_memory_stats(data: dict[str, Any]) -> str:
     """返回记忆库统计概览。"""
     ope = _make_operator()
