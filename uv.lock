@@ -322,7 +322,7 @@ jieba = [
 
 [[package]]
 name = "amrita-plugin-memory"
-version = "0.2.2"
+version = "0.2.6"
 source = { editable = "." }
 dependencies = [
     { name = "aiohttp" },

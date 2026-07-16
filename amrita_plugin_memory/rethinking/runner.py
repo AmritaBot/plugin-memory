@@ -16,7 +16,7 @@ from amrita_core.base.backend import BackendSlots
 from amrita_core.builtins.agent import ReActAgentStrategy
 from amrita_core.chatmanager import ChatObject
 from amrita_core.config import get_config
-from amrita_core.preset import PresetManager
+from amrita_core.preset import ModelPreset
 from amrita_core.types import Message, UniResponseUsage
 from amrita_core.utils import gather_usage
 from amrita_sense import WorkflowInterpreter
@@ -123,18 +123,13 @@ class SubconsciousRunner:
         self._is_running = True
         self._iter_stop_result = {}
 
-        preset = PresetManager().get_default_preset()
+        preset = await _state.get_preset()
         prompt_text = await self._load_prompt()
         user_msg_text = (
             f"现在是第 {self._total_runs + 1} 次潜意识推理循环。"
             f"请检查用户 (ID: {self._config.target_user_id}) 的记忆库，执行必要的整理操作。"
             f"完成后务必调用 subconscious_iter_stop。"
         )
-        if self._is_native_thinking():
-            user_msg_text += (
-                " （注意：你的模型启用了内置思考模式，请务必调用 think_and_reason。）"
-            )
-
         train = Message(role="system", content=prompt_text)
         user_input = user_msg_text
 
@@ -181,8 +176,7 @@ class SubconsciousRunner:
         await self._post_process(chat_obj)
 
     @staticmethod
-    def _is_native_thinking() -> bool:
-        preset = PresetManager().get_default_preset()
+    def _is_native_thinking(preset: ModelPreset) -> bool:
         return (
             preset.thinking_config is not None
             and preset.thinking_config.thinking_type == "enabled"

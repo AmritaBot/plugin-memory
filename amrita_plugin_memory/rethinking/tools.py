@@ -8,7 +8,6 @@ from typing import Any
 
 from amrita_core import on_tools
 from amrita_core.libchat import call_completion, get_last_response
-from amrita_core.preset import PresetManager
 from amrita_core.types import CONTENT_LIST_TYPE, Message
 from chromadb import GetResult
 from jinja2 import Template
@@ -308,7 +307,7 @@ async def _generate_send_content(intent: str, memory_context: str) -> str:
         current_time=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
         character_prompt=character_prompt,
     )
-    preset = PresetManager().get_default_preset()
+    preset = await _state.get_preset()
     messages: CONTENT_LIST_TYPE = [
         Message(role="system", content=system_content),
         Message(

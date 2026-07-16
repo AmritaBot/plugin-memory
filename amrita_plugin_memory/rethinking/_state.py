@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from amrita.plugins.chat.config import config_manager
+from amrita_core import ModelPreset
 from amrita_core.tools.manager import MultiToolsManager
 
 if TYPE_CHECKING:
@@ -13,6 +15,12 @@ _runner: SubconsciousRunner | None = None
 _pending_messages: list[dict[str, Any]] = []
 # 隔离的工具管理器 — 所有 @on_tools 装饰器通过 bound_to 注册到这里，不污染全局 ToolsManager
 _SUBCONSCIOUS_TOOLS = MultiToolsManager()
+
+
+async def get_preset() -> ModelPreset:
+    return await config_manager.get_preset(
+        (await config_manager.safe_get_config()).preset
+    )
 
 
 def get_runner() -> SubconsciousRunner | None:
