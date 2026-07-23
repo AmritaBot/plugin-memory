@@ -9,9 +9,7 @@ import random
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from amrita.plugins.chat.utils.app import CachedUserDataRepository
 from amrita.plugins.chat.utils.libchat import add_usage
-from amrita.plugins.chat.utils.sql import InsightsModel
 from amrita_core import SuspendObjectStream
 from amrita_core.base.backend import BackendSlots
 from amrita_core.builtins.agent import ReActAgentStrategy
@@ -24,6 +22,8 @@ from amrita_sense import WorkflowInterpreter
 from amrita_sense.runtime.types import InterpreterContext
 from jinja2 import Template
 from nonebot import logger
+from nonebot_plugin_amrita.database import InsightsModel
+from nonebot_plugin_amrita.memory import CachedUserDataRepository
 from nonebot_plugin_apscheduler import scheduler
 
 from ..config import DATA_PATH, SubconsciousConfig
@@ -48,7 +48,7 @@ class SubconsciousRunner:
 
     使用 ChatObject 作为数据容器 + 标准 Agent 框架（ReActAgentStrategy）。
     LIMITING_MEMORY 节点在 Agent Loop 之前运行 MemoryLimiter 压缩会话消息。
-    持久化使用 CachedUserDataRepository（uid=user_00000000）。
+    持久化使用 CachedUserDataRepository（user_00000000）。
     """
 
     def __init__(self, config: SubconsciousConfig) -> None:
@@ -268,7 +268,7 @@ class SubconsciousRunner:
         """从 CachedUserDataRepository 恢复状态。"""
         try:
             repo = CachedUserDataRepository()
-            mem = await repo.get_memory(0, False, uid=_REPO_UID)
+            mem = await repo.get_memory(_REPO_UID)
             # extra_prompt 存 JSON 元状态
             if mem.extra_prompt:
                 data = json.loads(mem.extra_prompt)
@@ -301,7 +301,7 @@ class SubconsciousRunner:
         """保存状态到 CachedUserDataRepository。"""
         try:
             repo = CachedUserDataRepository()
-            mem = await repo.get_memory(0, False, uid=_REPO_UID)
+            mem = await repo.get_memory(_REPO_UID)
             latest_abstract = self._last_abstracts[-1] if self._last_abstracts else ""
             mem.memory_json.abstract = latest_abstract
             mem.extra_prompt = json.dumps(
@@ -322,7 +322,7 @@ class SubconsciousRunner:
         """持久化待发送消息到 CachedUserDataRepository 的 extra_prompt 中。"""
         try:
             repo = CachedUserDataRepository()
-            mem = await repo.get_memory(0, False, uid=_REPO_UID)
+            mem = await repo.get_memory(_REPO_UID)
             existing: dict[str, Any] = {}
             if mem.extra_prompt:
                 try:

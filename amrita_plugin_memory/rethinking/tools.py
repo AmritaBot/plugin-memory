@@ -268,10 +268,10 @@ async def subconscious_read_chat_context(data: dict[str, Any]) -> str:
         return _tools_err(f"invalid target_user_id: {uid_str}")
     limit = int(data.get("limit", 10))
     try:
-        from amrita.plugins.chat.utils.app import CachedUserDataRepository
+        from nonebot_plugin_amrita.memory import CachedUserDataRepository
 
         repo = CachedUserDataRepository()
-        mem = await repo.get_memory(user_id, is_group=False)
+        mem = await repo.get_memory(f"user_{user_id}")
         messages = mem.memory_json.messages
         recent = messages[-limit:] if len(messages) > limit else messages
         return json.dumps(

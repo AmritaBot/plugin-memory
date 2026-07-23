@@ -23,6 +23,7 @@ Scope = Literal["group", "user"]  # type alias
 
 def _get_event(ctx: ToolContext) -> OB11Event:
     """从 ToolContext 中提取 OneBot V11 原始事件"""
+    assert ctx.ctx.chat_object
     amrictx: AmritaBotContext = ctx.ctx.chat_object._hook_kwargs["amrita"]
     return amrictx["event"]
 
