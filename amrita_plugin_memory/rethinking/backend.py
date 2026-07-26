@@ -50,7 +50,7 @@ class SubconsciousBackend(AbilityBackend, MemoryBackend):
             if (td := gm.get_tool(tool_name)) is not None:
                 self._tools_manager.register_tool(td)
             else:
-                logger.warning(f"[EXP Subconscious] Tool '{tool_name}' not found")
+                logger.warning(f"[Subconscious] Tool '{tool_name}' not found")
 
     async def load_ability_all(self, session_id: str) -> AbilityContext:
         return AbilityContext(

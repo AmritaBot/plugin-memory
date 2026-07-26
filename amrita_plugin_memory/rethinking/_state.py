@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from amrita.plugins.chat.config import config_manager
 from amrita_core import ModelPreset
@@ -10,9 +10,12 @@ from amrita_core.tools.manager import MultiToolsManager
 
 if TYPE_CHECKING:
     from .runner import SubconsciousRunner
+    from .types import PendingMsg
 
 _runner: SubconsciousRunner | None = None
-_pending_messages: list[dict[str, Any]] = []
+_pending_messages: list[PendingMsg] = []
+# 惩罚计数器 — 每次用户聊天取消计划时 +1，整理成功后重置
+_penalty_count: int = 0
 # 隔离的工具管理器 — 所有 @on_tools 装饰器通过 bound_to 注册到这里，不污染全局 ToolsManager
 _SUBCONSCIOUS_TOOLS = MultiToolsManager()
 
@@ -36,14 +39,34 @@ def get_target_user_id() -> str:
     return _runner._config.target_user_id if _runner is not None else ""
 
 
-def get_pending() -> list[dict[str, Any]]:
+def get_pending() -> list[PendingMsg]:
     return _pending_messages
 
 
-def set_pending(msgs: list[dict[str, Any]]) -> None:
+def set_pending(msgs: list[PendingMsg]) -> None:
     global _pending_messages
     _pending_messages = msgs
 
 
 def get_tools_manager() -> MultiToolsManager:
     return _SUBCONSCIOUS_TOOLS
+
+
+def get_penalty_count() -> int:
+    return _penalty_count
+
+
+def set_penalty_count(n: int) -> None:
+    global _penalty_count
+    _penalty_count = n
+
+
+def increment_penalty() -> int:
+    global _penalty_count
+    _penalty_count += 1
+    return _penalty_count
+
+
+def reset_penalty() -> None:
+    global _penalty_count
+    _penalty_count = 0

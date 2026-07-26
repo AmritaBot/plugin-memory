@@ -20,12 +20,21 @@ from .schemas import (
     DELETE_MEMORY_SCHEMA,
     DUPLICATE_HELPER_SCHEMA,
     GET_MEMORY_STATS_SCHEMA,
+    GET_PROFILE_SCHEMA,
     ITER_STOP_SCHEMA,
+    KNOWLEDGE_CREATE_SCHEMA,
+    KNOWLEDGE_DELETE_SCHEMA,
+    KNOWLEDGE_LIST_SCHEMA,
+    KNOWLEDGE_READ_SCHEMA,
+    KNOWLEDGE_SEARCH_SCHEMA,
+    KNOWLEDGE_UPDATE_SCHEMA,
     LIST_MEMORY_SCHEMA,
     READ_CHAT_CONTEXT_SCHEMA,
     READ_MEMORY_SCHEMA,
+    READ_SESSIONS_SCHEMA,
     SEND_TO_USER_SCHEMA,
     UPDATE_MEMORY_SCHEMA,
+    UPDATE_PROFILE_SCHEMA,
     WRITE_MEMORY_SCHEMA,
 )
 
@@ -218,15 +227,8 @@ async def subconscious_list_memory(data: dict[str, Any]) -> str:
 
 @on_tools(ITER_STOP_SCHEMA, strict=True, bound_to=_SUBCONSCIOUS_TOOLS)
 async def subconscious_iter_stop(data: dict[str, Any]) -> str:
-    runner = _state.get_runner()
-    if runner is not None:
-        runner._iter_stop_result = {
-            "next_time": data.get("next_time"),
-            "delay_seconds": data.get("delay_seconds"),
-            "summary": data.get("summary", ""),
-        }
     logger.info(
-        f"[EXP Subconscious] iter_stop: summary={str(data.get('summary', ''))[:80]}"
+        f"[Subconscious] iter_stop: summary={str(data.get('summary', ''))[:80]}"
     )
     return json.dumps(
         {"status": "acknowledged", "message": "推理循环已确认结束"}, ensure_ascii=False
@@ -246,15 +248,27 @@ async def subconscious_send_to_user(data: dict[str, Any]) -> str:
         content = await _generate_send_content(intent, memory_context)
     except Exception as e:
         logger.opt(exception=e, colors=True, raw=True).exception(
-            f"[EXP Subconscious] Generate send content failed: {e}"
+            f"[Subconscious] Generate send content failed: {e}"
         )
         return _tools_err(str(e))
+    # 持久化：保证消息在多次对话中连贯
     ts = datetime.now(timezone.utc).isoformat()
     pending = _state.get_pending()
     pending.append({"content": content, "timestamp": ts})
     await runner._save_pending_to_repo()
-    logger.info(f"[EXP Subconscious] Message queued: {content[:80]}")
-    return _tools_ok(status="queued", content=content, timestamp=ts)
+    # 即时发送
+    try:
+        from nonebot import get_bot
+
+        bot = get_bot()
+        await bot.send_private_msg(
+            user_id=int(runner._config.target_user_id), message=content
+        )
+        logger.info(f"[Subconscious] Message sent: {content[:80]}")
+        return _tools_ok(status="sent", content=content, timestamp=ts)
+    except Exception as e:
+        logger.warning(f"[Subconscious] Send failed (queued): {e}")
+        return _tools_ok(status="queued", content=content, timestamp=ts)
 
 
 @on_tools(READ_CHAT_CONTEXT_SCHEMA, strict=True, bound_to=_SUBCONSCIOUS_TOOLS)
@@ -296,7 +310,7 @@ async def _generate_send_content(intent: str, memory_context: str) -> str:
     runner = _state.get_runner()
     if runner is None:
         raise RuntimeError("Runner not initialized")
-    prompt_path = (runner._prompt_dir / "subconscious_send_prompt.txt").resolve()
+    prompt_path = (runner._prompt_dir / runner._config.prompt_send_file).resolve()
     ensure_prompt_file(prompt_path, DEFAULT_SEND_PROMPT)
     character_prompt = await load_character_prompt()
     template: Template = Template(prompt_path.read_text(encoding="utf-8"))
@@ -461,5 +475,207 @@ async def subconscious_get_memory_stats(data: dict[str, Any]) -> str:
     except Exception as e:
         logger.opt(exception=e, colors=True, raw=True).exception(
             f"subconscious_get_memory_stats error: {e}"
+        )
+        return _tools_err(str(e))
+
+
+# ── 全局知识库工具 ──
+
+
+def _get_kb_manager():
+    """获取 KnowledgeBaseManager 实例，未初始化则报错。"""
+    runner = _state.get_runner()
+    if runner is None or runner._kb_manager is None:
+        raise RuntimeError("KnowledgeBaseManager not initialized")
+    return runner._kb_manager
+
+
+@on_tools(KNOWLEDGE_LIST_SCHEMA, strict=True)
+@on_tools(KNOWLEDGE_LIST_SCHEMA, strict=True, bound_to=_SUBCONSCIOUS_TOOLS)
+async def subconscious_knowledge_list(data: dict[str, Any]) -> str:
+    try:
+        kb = _get_kb_manager()
+        items = await kb.list_all()
+        return json.dumps(
+            {"status": "success", "items": items, "total": len(items)},
+            ensure_ascii=False,
+            indent=2,
+        )
+    except Exception as e:
+        logger.opt(exception=e, colors=True, raw=True).exception(
+            f"knowledge_list error: {e}"
+        )
+        return _tools_err(str(e))
+
+
+@on_tools(KNOWLEDGE_READ_SCHEMA, strict=True)
+@on_tools(KNOWLEDGE_READ_SCHEMA, strict=True, bound_to=_SUBCONSCIOUS_TOOLS)
+async def subconscious_knowledge_read(data: dict[str, Any]) -> str:
+    try:
+        kb = _get_kb_manager()
+        result = await kb.read(
+            str(data["kid"]),
+            start_line=data.get("start_line"),
+            end_line=data.get("end_line"),
+        )
+        if "error" in result:
+            return _tools_err(str(result["error"]))
+        return json.dumps({"status": "success", **result}, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logger.opt(exception=e, colors=True, raw=True).exception(
+            f"knowledge_read error: {e}"
+        )
+        return _tools_err(str(e))
+
+
+@on_tools(KNOWLEDGE_CREATE_SCHEMA, strict=True)
+@on_tools(KNOWLEDGE_CREATE_SCHEMA, strict=True, bound_to=_SUBCONSCIOUS_TOOLS)
+async def subconscious_knowledge_create(data: dict[str, Any]) -> str:
+    try:
+        kb = _get_kb_manager()
+        body = str(data["body"])
+        if len(body) > 10000:
+            return _tools_err(f"Body too long ({len(body)} chars, max 10000)")
+        kid = await kb.create(
+            title=str(data["title"]),
+            summary=str(data["summary"]),
+            body=body,
+        )
+        return _tools_ok(kid=kid)
+    except Exception as e:
+        logger.opt(exception=e, colors=True, raw=True).exception(
+            f"knowledge_create error: {e}"
+        )
+        return _tools_err(str(e))
+
+
+@on_tools(KNOWLEDGE_UPDATE_SCHEMA, strict=True)
+@on_tools(KNOWLEDGE_UPDATE_SCHEMA, strict=True, bound_to=_SUBCONSCIOUS_TOOLS)
+async def subconscious_knowledge_update(data: dict[str, Any]) -> str:
+    try:
+        kb = _get_kb_manager()
+        kid = str(data["kid"])
+        title = data.get("title")
+        summary = data.get("summary")
+        body = data.get("body")
+        if title is None and summary is None and body is None:
+            return _tools_err("At least one of title/summary/body must be provided")
+        if body is not None and len(str(body)) > 10000:
+            return _tools_err(f"Body too long ({len(str(body))} chars, max 10000)")
+        result = await kb.update(
+            kid,
+            title=str(title) if title is not None else None,
+            summary=str(summary) if summary is not None else None,
+            body=str(body) if body is not None else None,
+        )
+        if result != "ok":
+            return _tools_err(result)
+        return _tools_ok(message="知识更新成功", kid=kid)
+    except Exception as e:
+        logger.opt(exception=e, colors=True, raw=True).exception(
+            f"knowledge_update error: {e}"
+        )
+        return _tools_err(str(e))
+
+
+@on_tools(KNOWLEDGE_DELETE_SCHEMA, strict=True)
+@on_tools(KNOWLEDGE_DELETE_SCHEMA, strict=True, bound_to=_SUBCONSCIOUS_TOOLS)
+async def subconscious_knowledge_delete(data: dict[str, Any]) -> str:
+    try:
+        kb = _get_kb_manager()
+        kid = str(data["kid"])
+        result = await kb.delete(kid)
+        if result != "ok":
+            return _tools_err(result)
+        return _tools_ok(message="知识删除成功", kid=kid)
+    except Exception as e:
+        logger.opt(exception=e, colors=True, raw=True).exception(
+            f"knowledge_delete error: {e}"
+        )
+        return _tools_err(str(e))
+
+
+@on_tools(KNOWLEDGE_SEARCH_SCHEMA, strict=True)
+@on_tools(KNOWLEDGE_SEARCH_SCHEMA, strict=True, bound_to=_SUBCONSCIOUS_TOOLS)
+async def subconscious_knowledge_search(data: dict[str, Any]) -> str:
+    try:
+        kb = _get_kb_manager()
+        top_k = int(data.get("top_k", 5))
+        items = await kb.search(str(data["query"]), top_k=top_k)
+        return json.dumps(
+            {"status": "success", "items": items, "total": len(items)},
+            ensure_ascii=False,
+            indent=2,
+        )
+    except Exception as e:
+        logger.opt(exception=e, colors=True, raw=True).exception(
+            f"knowledge_search error: {e}"
+        )
+        return _tools_err(str(e))
+
+
+# ── Session 与用户画像工具 ──
+
+
+def _get_runner():
+    """获取 SubconsciousRunner 实例，未初始化则报错。"""
+    runner = _state.get_runner()
+    if runner is None:
+        raise RuntimeError("SubconsciousRunner not initialized")
+    return runner
+
+
+@on_tools(READ_SESSIONS_SCHEMA, strict=True, bound_to=_SUBCONSCIOUS_TOOLS)
+async def subconscious_read_sessions(data: dict[str, Any]) -> str:
+    try:
+        runner = _get_runner()
+        n = int(data.get("n", 5))
+        items = await runner._read_recent_sessions(n)
+        return json.dumps(
+            {"status": "success", "sessions": items, "total": len(items)},
+            ensure_ascii=False,
+            indent=2,
+        )
+    except Exception as e:
+        logger.opt(exception=e, colors=True, raw=True).exception(
+            f"read_sessions error: {e}"
+        )
+        return _tools_err(str(e))
+
+
+@on_tools(GET_PROFILE_SCHEMA, strict=True, bound_to=_SUBCONSCIOUS_TOOLS)
+async def subconscious_get_profile(data: dict[str, Any]) -> str:
+    try:
+        runner = _get_runner()
+        profile = await runner._read_profile(
+            start_line=data.get("start_line"),
+            end_line=data.get("end_line"),
+        )
+        return json.dumps(
+            {"status": "success", **profile},
+            ensure_ascii=False,
+            indent=2,
+        )
+    except Exception as e:
+        logger.opt(exception=e, colors=True, raw=True).exception(
+            f"get_profile error: {e}"
+        )
+        return _tools_err(str(e))
+
+
+@on_tools(UPDATE_PROFILE_SCHEMA, strict=True, bound_to=_SUBCONSCIOUS_TOOLS)
+async def subconscious_update_profile(data: dict[str, Any]) -> str:
+    try:
+        runner = _get_runner()
+        await runner._update_profile(
+            summary=str(data["summary"]),
+            new_lines=str(data["new_lines"]),
+            start_line=data.get("start_line"),
+            end_line=data.get("end_line"),
+        )
+        return _tools_ok(message="画像增量更新成功")
+    except Exception as e:
+        logger.opt(exception=e, colors=True, raw=True).exception(
+            f"update_profile error: {e}"
         )
         return _tools_err(str(e))

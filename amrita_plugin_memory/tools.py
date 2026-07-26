@@ -40,7 +40,10 @@ def _resolve_scope_id(ctx: ToolContext, scope: str) -> str:
             raise ValueError("当前不在群聊中，无法使用群共享记忆")
         return f"group_{event.group_id}"
     elif scope == "user":
-        return f"user_{event.user_id}"  # type: ignore
+        user_id = getattr(event, "user_id", None)
+        if user_id is None:
+            raise ValueError("Event has no user_id attribute")
+        return f"user_{user_id}"
     else:
         raise ValueError(f"无效的 scope: {scope}")
 

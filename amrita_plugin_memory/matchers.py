@@ -112,7 +112,7 @@ async def _handle_list(
             doc = documents[i] if i < len(documents) else ""
             preview = doc[:50] + "..." if len(doc) > 50 else doc
             lines.append(
-                f"[{meta.get('importance', '-')}] {doc_id[:8]}… "
+                f"[{meta.get('importance', '-')}] [{doc_id}] "
                 f"{preview} | tag: {meta.get('tags', '-')}"
             )
 
@@ -147,7 +147,7 @@ async def _handle_search(
         raw_metas = res.get("metadatas")
         flat_metas = raw_metas[0] if raw_metas else []
         raw_dist = res.get("distances")
-        distances: list[float] = raw_dist[0] if raw_dist else []  # type: ignore[assignment]
+        distances: list[float] = raw_dist[0] if raw_dist else []
 
         lines = [f"🔍 {_label(scope)} 搜索「{query}」结果:"]
         for i, doc_id in enumerate(flat_ids):
@@ -156,7 +156,7 @@ async def _handle_search(
             dist = distances[i] if i < len(distances) else 0.0
             preview = doc[:50] + "..." if len(doc) > 50 else doc
             lines.append(
-                f"[{meta.get('importance', '-')}] {doc_id[:8]}… "
+                f"[{meta.get('importance', '-')}] [{doc_id}] "
                 f"{preview} | tag: {meta.get('tags', '-')} | score: {dist:.3f}"
             )
 
@@ -180,16 +180,33 @@ async def _handle_delete(
 
     try:
         result = await ope.get_all_notes(partition_id, include=["metadatas"])
-        if doc_id not in (result.get("ids") or []):
-            await matcher.finish(f"{_label(scope)} 未找到记忆: {doc_id}")
+        all_ids: list[str] = result.get("ids") or []
+
+        # 精确匹配
+        if doc_id in all_ids:
+            resolved_id = doc_id
+        else:
+            # 前缀匹配
+            matches = [mid for mid in all_ids if mid.startswith(doc_id)]
+            if len(matches) == 0:
+                await matcher.finish(
+                    f"{_label(scope)} 未找到匹配的记忆: {doc_id}\n"
+                    f"提示: 使用 /memory {scope} list 查看全部 ID"
+                )
+            elif len(matches) > 1:
+                await matcher.finish(
+                    f"{_label(scope)} 前缀 '{doc_id}' 匹配多条记忆，请提供更完整的 ID:\n"
+                    + "\n".join(f"  - {m}" for m in matches)
+                )
+            resolved_id = matches[0]
 
         if scope == "group" and role == "member":
             await matcher.finish(
                 f"❌ 无权删除{_label(scope)}记忆，仅管理员和群主可删除"
             )
 
-        await ope.delete_note(partition_id, doc_id)
-        await matcher.finish(f"✅ 已删除 {_label(scope)} 记忆: {doc_id[:8]}…")
+        await ope.delete_note(partition_id, resolved_id)
+        await matcher.finish(f"✅ 已删除 {_label(scope)} 记忆: [{resolved_id}]")
     except FinishedException:
         return
     except Exception as e:

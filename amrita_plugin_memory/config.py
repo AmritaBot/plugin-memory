@@ -17,9 +17,6 @@ class SubconsciousConfig(BaseModel):
     """常驻推理循环（潜意识层）配置 — 实验性功能"""
 
     enabled: bool = Field(default=False, description="是否启用常驻推理循环")
-    experimental: bool = Field(
-        default=True, description="实验性标注，启用时日志输出 [EXPERIMENTAL]"
-    )
     target_user_id: str = Field(
         default="", description="目标用户ID（MVP仅支持单用户），为空则不启动"
     )
@@ -33,24 +30,30 @@ class SubconsciousConfig(BaseModel):
     loop_detect_threshold: int = Field(
         default=3, ge=2, le=10, description="连续相同工具调用次数阈值，触发后注入提示"
     )
-    initial_delay_seconds: int = Field(
-        default=60, ge=1, description="启动后首次触发延迟（秒）"
+    rethink_base_delay_minutes: int = Field(
+        default=30, ge=1, description="用户聊天后首次计划延迟（分钟）"
     )
-    default_interval_seconds: int = Field(
-        default=600, ge=10, description="LLM 未返回时间时的默认间隔（秒）"
+    rethink_penalty_multiplier: float = Field(
+        default=1.5, ge=1.0, le=10.0, description="取消惩罚指数倍率"
     )
-    pause_on_user_chat: bool = Field(
-        default=True, description="目标用户聊天时是否暂停推理循环"
-    )
-    pause_wakeup_min_seconds: int = Field(
-        default=180, ge=10, description="用户聊天后唤醒的最小延迟（秒）"
-    )
-    pause_wakeup_max_seconds: int = Field(
-        default=480, ge=60, description="用户聊天后唤醒的最大延迟（秒）"
+    rethink_max_delay_minutes: int = Field(
+        default=1440, ge=60, le=10080, description="惩罚延迟上限（分钟），默认1天"
     )
     prompt_file: str = Field(
-        default="subconscious_prompt.txt",
-        description="系统提示词文件名，相对于 config/amrita_plugin_memory/",
+        default="prompt/subconscious_main.md.jinja2",
+        description="主推理提示词文件名，相对于 config/amrita_plugin_memory/",
+    )
+    prompt_send_file: str = Field(
+        default="prompt/subconscious_send.md.jinja2",
+        description="主动消息生成提示词文件名，相对于 config/amrita_plugin_memory/",
+    )
+    prompt_knowledge_file: str = Field(
+        default="prompt/knowledge_guide.md.jinja2",
+        description="知识库使用指南文件名，相对于 config/amrita_plugin_memory/",
+    )
+    prompt_profile_file: str = Field(
+        default="prompt/profile_guide.md.jinja2",
+        description="画像构建指南文件名，相对于 config/amrita_plugin_memory/",
     )
     enable_memory_compress: bool = Field(
         default=True, description="是否在每次运行后压缩持久化摘要"
@@ -69,22 +72,29 @@ class SubconsciousConfig(BaseModel):
         le=20,
         description="保留最近 N 轮摘要的滑动窗口大小",
     )
+    knowledge_max_chars: int = Field(
+        default=10000,
+        ge=100,
+        le=100000,
+        description="全局知识库单条正文最大字符数",
+    )
+    knowledge_collection_name: str = Field(
+        default="amrita_global_knowledge",
+        description="ChromaDB 知识库 collection 名称",
+    )
 
 
 class ConfigFile(BaseModel):
     """配置文件"""
 
     short_term_expiry_days: int = Field(
-        default=3, description="短期记忆的过期天数，默认为3天"
+        default=7, description="短期记忆的过期天数，默认为7天"
     )
     long_term_expiry_days: int = Field(
-        default=30, description="长期记忆的过期天数，默认为30天"
-    )
-    permanent_expiry_days: int = Field(
-        default=365, description="永久记忆的过期天数，默认为1年"
+        default=90, description="长期记忆的过期天数，默认为90天"
     )
     per_session_memory_limit: int = Field(
-        default=50, description="每个会话的记忆数量限制，默认为50条"
+        default=100, description="每个会话的记忆数量限制，默认为50条"
     )
     subconscious: SubconsciousConfig = Field(
         default_factory=SubconsciousConfig, description="常驻推理循环配置"

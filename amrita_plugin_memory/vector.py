@@ -23,7 +23,6 @@ from chromadb.api.models.Collection import Collection
 from chromadb.api.types import (
     CollectionMetadata,
     DataLoader,
-    DefaultEmbeddingFunction,
     Embeddable,
     EmbeddingFunction,
     Loadable,
@@ -131,8 +130,7 @@ class WrappedClientAPI:
         schema: Schema | None = None,
         configuration: CreateCollectionConfiguration | None = None,
         metadata: CollectionMetadata | None = None,
-        embedding_function: chromadb.EmbeddingFunction[Embeddable]
-        | None = DefaultEmbeddingFunction(),  # type: ignore
+        embedding_function: EmbeddingFunction[Embeddable] | None = None,
         data_loader: DataLoader[Loadable] | None = None,
         get_or_create: bool = False,
     ) -> Collection:
@@ -175,8 +173,7 @@ class WrappedClientAPI:
     async def get_collection(
         self,
         name: str,
-        embedding_function: EmbeddingFunction[Embeddable]
-        | None = DefaultEmbeddingFunction(),  # pyright: ignore[reportArgumentType]
+        embedding_function: EmbeddingFunction[Embeddable] | None = None,
         data_loader: DataLoader[Loadable] | None = None,
     ) -> Collection:
         """Get a collection with the given name.
@@ -208,8 +205,7 @@ class WrappedClientAPI:
     async def get_collection_by_id(
         self,
         id: UUID,
-        embedding_function: EmbeddingFunction[Embeddable]
-        | None = DefaultEmbeddingFunction(),  # type: ignore
+        embedding_function: EmbeddingFunction[Embeddable] | None = None,
         data_loader: DataLoader[Loadable] | None = None,
     ) -> Collection:
         """Get a collection by its ID.
@@ -245,8 +241,7 @@ class WrappedClientAPI:
         schema: Schema | None = None,
         configuration: CreateCollectionConfiguration | None = None,
         metadata: CollectionMetadata | None = None,
-        embedding_function: EmbeddingFunction[Embeddable]
-        | None = DefaultEmbeddingFunction(),  # type: ignore
+        embedding_function: EmbeddingFunction[Embeddable] | None = None,
         data_loader: DataLoader[Loadable] | None = None,
     ) -> Collection:
         """Get or create a collection with the given name and metadata.
@@ -407,11 +402,11 @@ class AsyncUserMemory:
         include: chromadb.Include = ["metadatas", "documents"],
     ) -> chromadb.QueryResult:
         async with get_lock(self._collection_name, user_id):
-            queue_embedding = await call_embedding([query_text], build_preset())
-            assert len(queue_embedding) == 1, "Invalid embedding vector length"
+            query_vector = await call_embedding([query_text], build_preset())
+            assert len(query_vector) == 1, "Invalid embedding vector length"
             return await any_to_thread(
                 self._collection.query,
-                queue_embedding[0].embedding,
+                query_vector[0].embedding,
                 [
                     query_text,
                 ],

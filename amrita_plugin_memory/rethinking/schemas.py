@@ -97,16 +97,10 @@ LIST_MEMORY_SCHEMA = FunctionDefinitionSchema(
 
 ITER_STOP_SCHEMA = FunctionDefinitionSchema(
     name="subconscious_iter_stop",
-    description="结束本次潜意识推理循环。必须在本轮所有整理工作完成后调用。设置下次运行时间。",
+    description="结束本次潜意识推理循环。必须在本轮所有整理工作完成后调用。",
     parameters=FunctionParametersSchema(
         type="object",
         properties={
-            "next_time": FunctionPropertySchema(
-                type="string", description="下次运行的 ISO 8601 时间戳", nullable=True
-            ),
-            "delay_seconds": FunctionPropertySchema(
-                type="integer", description="距现在多少秒后运行", nullable=True
-            ),
             "summary": FunctionPropertySchema(
                 type="string", description="本轮做了什么工作的简要摘要"
             ),
@@ -189,6 +183,171 @@ GET_MEMORY_STATS_SCHEMA = FunctionDefinitionSchema(
     parameters=FunctionParametersSchema(type="object", properties={}, required=[]),
 )
 
+# ── 全局知识库工具 ──
+
+KNOWLEDGE_LIST_SCHEMA = FunctionDefinitionSchema(
+    name="subconscious_knowledge_list",
+    description="列出全局知识库中的所有知识条目（不含正文），返回 id、标题、摘要预览、行数、时间戳",
+    parameters=FunctionParametersSchema(type="object", properties={}, required=[]),
+)
+
+KNOWLEDGE_READ_SCHEMA = FunctionDefinitionSchema(
+    name="subconscious_knowledge_read",
+    description=(
+        "读取指定知识条目的完整内容，支持按行滑动读取。"
+        "首次读取不传 start_line/end_line 获取全文；"
+        "内容过长时分段读取，用 start_line 和 end_line 控制窗口"
+    ),
+    parameters=FunctionParametersSchema(
+        type="object",
+        properties={
+            "kid": FunctionPropertySchema(type="string", description="知识条目ID"),
+            "start_line": FunctionPropertySchema(
+                type="integer", description="起始行号（0-based），默认从第一行开始"
+            ),
+            "end_line": FunctionPropertySchema(
+                type="integer", description="结束行号（不含），默认到末尾"
+            ),
+        },
+        required=["kid"],
+    ),
+)
+
+KNOWLEDGE_CREATE_SCHEMA = FunctionDefinitionSchema(
+    name="subconscious_knowledge_create",
+    description="创建新的全局知识条目。摘要用于语义搜索，正文用于详细阅读。单条正文不超过10000字符",
+    parameters=FunctionParametersSchema(
+        type="object",
+        properties={
+            "title": FunctionPropertySchema(
+                type="string", description="知识标题，简洁明了"
+            ),
+            "summary": FunctionPropertySchema(
+                type="string", description="知识摘要（≤200字），会被向量化用于语义搜索"
+            ),
+            "body": FunctionPropertySchema(
+                type="string", description="知识正文，完整详细内容"
+            ),
+        },
+        required=["title", "summary", "body"],
+    ),
+)
+
+KNOWLEDGE_UPDATE_SCHEMA = FunctionDefinitionSchema(
+    name="subconscious_knowledge_update",
+    description="更新已有知识条目。至少传一个可选字段。若更新摘要则重新向量化",
+    parameters=FunctionParametersSchema(
+        type="object",
+        properties={
+            "kid": FunctionPropertySchema(
+                type="string", description="要更新的知识条目ID"
+            ),
+            "title": FunctionPropertySchema(type="string", description="新的标题"),
+            "summary": FunctionPropertySchema(type="string", description="新的摘要"),
+            "body": FunctionPropertySchema(type="string", description="新的正文"),
+        },
+        required=["kid"],
+    ),
+)
+
+KNOWLEDGE_DELETE_SCHEMA = FunctionDefinitionSchema(
+    name="subconscious_knowledge_delete",
+    description="删除指定ID的全局知识条目（同时删除文件和向量）",
+    parameters=FunctionParametersSchema(
+        type="object",
+        properties={
+            "kid": FunctionPropertySchema(
+                type="string", description="要删除的知识条目ID"
+            )
+        },
+        required=["kid"],
+    ),
+)
+
+KNOWLEDGE_SEARCH_SCHEMA = FunctionDefinitionSchema(
+    name="subconscious_knowledge_search",
+    description="在全局知识库中语义搜索相关条目（仅匹配摘要），返回最相关的条目及其摘要",
+    parameters=FunctionParametersSchema(
+        type="object",
+        properties={
+            "query": FunctionPropertySchema(
+                type="string", description="搜索查询，自然语言描述想找什么"
+            ),
+            "top_k": FunctionPropertySchema(
+                type="integer", description="返回数量，默认5条"
+            ),
+        },
+        required=["query"],
+    ),
+)
+
+# ── Session 与用户画像工具 ──
+
+READ_SESSIONS_SCHEMA = FunctionDefinitionSchema(
+    name="subconscious_read_sessions",
+    description=(
+        "读取目标用户最近的归档会话列表（含摘要），了解用户近期在聊什么话题。"
+        "每轮推理开始时先调用此工具掌握用户动态，再决定是否需要整理记忆"
+    ),
+    parameters=FunctionParametersSchema(
+        type="object",
+        properties={
+            "n": FunctionPropertySchema(
+                type="integer", description="返回最近 N 个会话，默认5"
+            ),
+        },
+        required=[],
+    ),
+)
+
+GET_PROFILE_SCHEMA = FunctionDefinitionSchema(
+    name="subconscious_get_profile",
+    description=(
+        "读取用户画像：摘要（向量化可用）和完整正文。用 total_lines 判断是否需要分段读取。"
+        "返回的 body 只包含当前窗口的内容——content 字段为实际返回的行段"
+    ),
+    parameters=FunctionParametersSchema(
+        type="object",
+        properties={
+            "start_line": FunctionPropertySchema(
+                type="integer", description="起始行号（0-based），默认全文"
+            ),
+            "end_line": FunctionPropertySchema(
+                type="integer", description="结束行号（不含），默认全文"
+            ),
+        },
+        required=[],
+    ),
+)
+
+UPDATE_PROFILE_SCHEMA = FunctionDefinitionSchema(
+    name="subconscious_update_profile",
+    description=(
+        "增量更新用户画像。省略 start_line/end_line 时追加到末尾；"
+        "指定时替换 [start_line, end_line) 之间的行。"
+        "渐进式构建——每次只修改有变化的部分"
+    ),
+    parameters=FunctionParametersSchema(
+        type="object",
+        properties={
+            "summary": FunctionPropertySchema(
+                type="string", description="画像摘要（≤200字），用于语义检索"
+            ),
+            "start_line": FunctionPropertySchema(
+                type="integer", description="起始行号（0-based），省略时追加到末尾"
+            ),
+            "end_line": FunctionPropertySchema(
+                type="integer", description="结束行号（不含），省略时追加到末尾"
+            ),
+            "new_lines": FunctionPropertySchema(
+                type="string",
+                description="新内容（多行文本，用换行符分隔）",
+            ),
+        },
+        required=["summary", "new_lines"],
+    ),
+)
+
 _SUBCONSCIOUS_TOOL_FUNCTIONS: list[ToolFunctionSchema] = [
     ToolFunctionSchema(function=schema, type="function", strict=True)
     for schema in [
@@ -200,6 +359,15 @@ _SUBCONSCIOUS_TOOL_FUNCTIONS: list[ToolFunctionSchema] = [
         ITER_STOP_SCHEMA,
         DUPLICATE_HELPER_SCHEMA,
         GET_MEMORY_STATS_SCHEMA,
+        KNOWLEDGE_LIST_SCHEMA,
+        KNOWLEDGE_READ_SCHEMA,
+        KNOWLEDGE_CREATE_SCHEMA,
+        KNOWLEDGE_UPDATE_SCHEMA,
+        KNOWLEDGE_DELETE_SCHEMA,
+        KNOWLEDGE_SEARCH_SCHEMA,
+        READ_SESSIONS_SCHEMA,
+        GET_PROFILE_SCHEMA,
+        UPDATE_PROFILE_SCHEMA,
     ]
 ]
 
