@@ -479,14 +479,16 @@ async def subconscious_get_memory_stats(data: dict[str, Any]) -> str:
         return _tools_err(str(e))
 
 
-# ── 全局知识库工具 ──
+#  全局知识库工具
 
 
 def _get_kb_manager():
-    """获取 KnowledgeBaseManager 实例，未初始化则报错。"""
+    """获取 KnowledgeBaseManager 实例，未初始化或已禁用则报错。"""
     runner = _state.get_runner()
-    if runner is None or runner._kb_manager is None:
-        raise RuntimeError("KnowledgeBaseManager not initialized")
+    if runner is None:
+        raise RuntimeError("SubconsciousRunner not initialized")
+    if not runner._config.enable_knowledge or runner._kb_manager is None:
+        raise RuntimeError("全局知识库未启用（enable_knowledge=false）")
     return runner._kb_manager
 
 
@@ -614,7 +616,7 @@ async def subconscious_knowledge_search(data: dict[str, Any]) -> str:
         return _tools_err(str(e))
 
 
-# ── Session 与用户画像工具 ──
+#  Session 与用户画像工具
 
 
 def _get_runner():

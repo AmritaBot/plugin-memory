@@ -54,7 +54,7 @@ class KnowledgeBaseManager:
         self._collection: Collection | None = None
         self._index: list[KnowledgeEntry] = []
 
-    #  ── 生命周期 ──
+    #   生命周期
 
     async def init(self) -> None:
         """创建目录，获取 ChromaDB collection。"""
@@ -125,7 +125,7 @@ class KnowledgeBaseManager:
                 f"[KB] validate_on_startup: all {len(index)} entries consistent"
             )
 
-    #  ── 公开 API ──
+    #   公开 API
 
     async def list_all(self) -> list[KnowledgeListItem]:
         """返回索引中全部知识条目（不含正文）。"""
@@ -322,7 +322,7 @@ class KnowledgeBaseManager:
             )
         return items
 
-    #  ── 内部方法 ──
+    #   内部方法
 
     async def _recover_orphan_file(
         self,

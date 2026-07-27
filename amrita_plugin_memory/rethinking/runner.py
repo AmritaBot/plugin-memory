@@ -97,13 +97,16 @@ class SubconsciousRunner:
         readme_path = self._prompt_dir / "prompt" / "README.md"
         ensure_prompt_file(readme_path, PROMPT_README)
         # 初始化全局知识库（参数从配置文件读取）
-        self._kb_manager = KnowledgeBaseManager(
-            DATA_PATH,
-            collection_name=self._config.knowledge_collection_name,
-            max_chars=self._config.knowledge_max_chars,
-        )
-        await self._kb_manager.init()
-        await self._kb_manager.validate_on_startup()
+        if self._config.enable_knowledge:
+            self._kb_manager = KnowledgeBaseManager(
+                DATA_PATH,
+                collection_name=self._config.knowledge_collection_name,
+                max_chars=self._config.knowledge_max_chars,
+            )
+            await self._kb_manager.init()
+            await self._kb_manager.validate_on_startup()
+        else:
+            logger.info("[Subconscious] Knowledge base disabled via config")
         logger.info("[Subconscious] Idle — waiting for user chat to trigger first run")
 
     def stop(self) -> None:

@@ -183,7 +183,7 @@ GET_MEMORY_STATS_SCHEMA = FunctionDefinitionSchema(
     parameters=FunctionParametersSchema(type="object", properties={}, required=[]),
 )
 
-# ── 全局知识库工具 ──
+#  全局知识库工具
 
 KNOWLEDGE_LIST_SCHEMA = FunctionDefinitionSchema(
     name="subconscious_knowledge_list",
@@ -281,7 +281,7 @@ KNOWLEDGE_SEARCH_SCHEMA = FunctionDefinitionSchema(
     ),
 )
 
-# ── Session 与用户画像工具 ──
+#  Session 与用户画像工具
 
 READ_SESSIONS_SCHEMA = FunctionDefinitionSchema(
     name="subconscious_read_sessions",

@@ -82,6 +82,10 @@ class SubconsciousConfig(BaseModel):
         default="amrita_global_knowledge",
         description="ChromaDB 知识库 collection 名称",
     )
+    enable_knowledge: bool = Field(
+        default=True,
+        description="是否启用全局知识库（关闭后知识工具可调用但返回未启用错误）",
+    )
 
 
 class ConfigFile(BaseModel):
