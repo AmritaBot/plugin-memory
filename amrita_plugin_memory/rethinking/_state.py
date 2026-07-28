@@ -16,6 +16,8 @@ _runner: SubconsciousRunner | None = None
 _pending_messages: list[PendingMsg] = []
 # 惩罚计数器 — 每次用户聊天取消计划时 +1，整理成功后重置
 _penalty_count: int = 0
+# 知识建议队列 — 对话 LLM 提议创建/更新知识，潜意识 Agent 下一轮审查
+_knowledge_suggestions: list[dict[str, str]] = []
 # 隔离的工具管理器 — 所有 @on_tools 装饰器通过 bound_to 注册到这里，不污染全局 ToolsManager
 _SUBCONSCIOUS_TOOLS = MultiToolsManager()
 
@@ -70,3 +72,17 @@ def increment_penalty() -> int:
 def reset_penalty() -> None:
     global _penalty_count
     _penalty_count = 0
+
+
+def get_knowledge_suggestions() -> list[dict[str, str]]:
+    return _knowledge_suggestions
+
+
+def set_knowledge_suggestions(suggestions: list[dict[str, str]]) -> None:
+    global _knowledge_suggestions
+    _knowledge_suggestions = suggestions
+
+
+def add_knowledge_suggestion(suggestion: dict[str, str]) -> None:
+    global _knowledge_suggestions
+    _knowledge_suggestions.append(suggestion)

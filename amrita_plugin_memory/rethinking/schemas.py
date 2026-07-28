@@ -281,6 +281,53 @@ KNOWLEDGE_SEARCH_SCHEMA = FunctionDefinitionSchema(
     ),
 )
 
+#  知识建议（对话 LLM 提议，潜意识 Agent 审查后实际写入）
+
+KNOWLEDGE_SUGGEST_SCHEMA = FunctionDefinitionSchema(
+    name="knowledge_suggest",
+    description=(
+        "向全局知识库提议添加或更新知识。注意：你的提议不会直接写入——"
+        "它会被转发给后台的记忆管家（Subconscious Agent），"
+        "由它在下一轮推理中审查并决定是否实际创建或更新。"
+        "提议后无需等待结果，记忆管家会自行处理。"
+        "action: 'create' 提议新建知识，'update' 提议更新已有知识（需传 kid）"
+    ),
+    parameters=FunctionParametersSchema(
+        type="object",
+        properties={
+            "action": FunctionPropertySchema(
+                type="string",
+                enum=["create", "update"],
+                description="create=提议新建，update=提议更新已有知识",
+            ),
+            "title": FunctionPropertySchema(type="string", description="知识标题"),
+            "summary": FunctionPropertySchema(
+                type="string", description="知识摘要（≤200字）"
+            ),
+            "body": FunctionPropertySchema(type="string", description="知识正文"),
+            "kid": FunctionPropertySchema(
+                type="string", description="update 时必传：要更新的知识条目 ID"
+            ),
+            "reason": FunctionPropertySchema(
+                type="string", description="提议理由：为什么值得记录"
+            ),
+        },
+        required=["action", "title", "summary", "body", "reason"],
+    ),
+)
+
+READ_SUGGESTIONS_SCHEMA = FunctionDefinitionSchema(
+    name="subconscious_read_suggestions",
+    description=(
+        "读取对话 LLM 提交的待审查知识建议列表。"
+        "每条建议包含 action（create/update）、标题、摘要、正文、理由。"
+        "审查后对值得保留的用 subconscious_knowledge_create 或"
+        "subconscious_knowledge_update 实际写入，不合适的忽略即可。"
+        "调用后会自动清空建议队列。"
+    ),
+    parameters=FunctionParametersSchema(type="object", properties={}, required=[]),
+)
+
 #  Session 与用户画像工具
 
 READ_SESSIONS_SCHEMA = FunctionDefinitionSchema(

@@ -277,7 +277,7 @@ class SubconsciousRunner:
             mem = await repo.get_memory(_REPO_UID)
             # extra_prompt 存 JSON 元状态
             if mem.extra_prompt:
-                data = json.loads(mem.extra_prompt)
+                data: dict[str, Any] = json.loads(mem.extra_prompt)
                 self._total_runs = int(data.get("total_runs", 0))
                 self._last_abstracts = data.get("last_abstracts", [])
                 if isinstance(self._last_abstracts, list):
@@ -290,6 +290,10 @@ class SubconsciousRunner:
                 pending = data.get("pending_messages", [])
                 if isinstance(pending, list):
                     _state.set_pending(pending)
+                # 恢复知识建议队列
+                suggestions = data.get("knowledge_suggestions", [])
+                if isinstance(suggestions, list):
+                    _state.set_knowledge_suggestions(suggestions)
             # memory_json.abstract 用于 Core Jinja2 模板的 <SUMMARY> 注入
             if mem.memory_json.abstract:
                 # 确保 abstract 也在 last_abstracts 中（兜底）
@@ -336,6 +340,7 @@ class SubconsciousRunner:
                 except json.JSONDecodeError:
                     pass
             existing["pending_messages"] = _state.get_pending()
+            existing["knowledge_suggestions"] = _state.get_knowledge_suggestions()
             mem.extra_prompt = json.dumps(existing, ensure_ascii=False)
             await repo.update_memory_data(mem)
         except Exception as e:
@@ -355,7 +360,7 @@ class SubconsciousRunner:
 
         character_prompt = await load_character_prompt()
 
-        template = Template(main_path.read_text(encoding="utf-8"))
+        template: Template = Template(main_path.read_text(encoding="utf-8"))
         now = datetime.now(timezone.utc)
         prompt = await asyncio.to_thread(
             template.render,
@@ -367,9 +372,26 @@ class SubconsciousRunner:
             character_prompt=character_prompt,
         )
 
-        # 注入知识库 & 画像指南（从磁盘文件读取，用户可自定义）
-        prompt += "\n\n" + kn_path.read_text(encoding="utf-8")
-        prompt += "\n\n" + pr_path.read_text(encoding="utf-8")
+        # 注入知识库 & 画像指南（Jinja2 渲染，支持变量插值）
+        common_vars = {
+            "current_time": now.strftime("%Y-%m-%d %H:%M:%S UTC"),
+            "target_user_id": self._config.target_user_id or "(未配置)",
+        }
+        prompt += "\n\n" + await asyncio.to_thread(
+            Template(kn_path.read_text(encoding="utf-8")).render, **common_vars
+        )
+        prompt += "\n\n" + await asyncio.to_thread(
+            Template(pr_path.read_text(encoding="utf-8")).render, **common_vars
+        )
+
+        # 待审查的知识建议 — 注入提示让 Agent 主动拉取
+        suggestions = _state.get_knowledge_suggestions()
+        if suggestions:
+            prompt += (
+                f"\n\n📋 有 {len(suggestions)} 条来自对话 LLM 的知识建议等待审查。"
+                f"请调用 subconscious_read_suggestions 获取详情，"
+                f"审查后对值得保留的用 subconscious_knowledge_create/update 实际写入。"
+            )
 
         # Phase 3: 膨胀感知 — 查 ChromaDB 总量，超阈值注入警告
         try:

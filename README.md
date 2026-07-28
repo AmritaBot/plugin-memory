@@ -54,6 +54,8 @@ allow_send_to_user = true
 enable_knowledge = false
 ```
 
+> 知识库依赖潜意识推理——当 `enabled = false` 时，知识库也会自动禁用。
+
 ### 4. 验证
 
 观察日志中 `[Subconscious]` 前缀的输出：
@@ -78,6 +80,7 @@ flowchart TB
         S_Write --> ChromaDB[("ChromaDB<br/>向量数据库")]
         S_Read --> ChromaDB
         S_Mut --> ChromaDB
+        S_LLM -->|"knowledge_list/read/search"| ChromaDB
     end
 
     subgraph Subconscious["底层：Subconscious Reasoning"]
@@ -95,7 +98,8 @@ flowchart TB
         AgentLoop --> Profile["用户画像<br/>行级增量更新"]
     end
 
-    Surface -->|"knowledge_* 工具"| KB
+    Surface -->|"knowledge_suggest"| SuggQueue["知识建议队列"]
+    SuggQueue --> AgentLoop
     Surface -.->|"共享 ChromaDB"| Subconscious
     Runner -->|"持久化状态"| CachedRepo["CachedUserDataRepository"]
     Runner -->|"usage 统计"| Insights["InsightsModel<br/>全局 Token 统计"]
@@ -133,7 +137,16 @@ flowchart TB
 
 ### 共享：全局知识库
 
-知识库是**表层和潜意识双层共享**的资源——知识工具通过双重 `@on_tools` 注册，对话 LLM 和后台 Agent 均可调用。
+知识库是**表层和潜意识双层共享**的资源。读取操作（`list`/`read`/`search`）通过双重 `@on_tools` 注册，对话 LLM 和后台 Agent 均可直接调用。**写入操作**（`create`/`update`/`delete`）仅限潜意识 Agent——表层通过 `knowledge_suggest` 提交建议，由 Agent 在下一轮推理中审查后决定是否实际写入：
+
+```mermaid
+flowchart LR
+    ChatLLM["对话 LLM"] -->|"knowledge_suggest"| Queue["建议队列<br/>(持久化)"]
+    Queue -->|"subconscious_read_suggestions"| Agent["Subconscious Agent<br/>下一轮推理"]
+    Agent -->|"审查"| Decision{"值得记录？"}
+    Decision -->|"Yes"| SubCreate["subconscious_knowledge_create"]
+    Decision -->|"No"| Drop["忽略"]
+```
 
 每条知识由三个组件共同管理：
 
@@ -178,23 +191,21 @@ flowchart LR
 
 ### 表层工具（`tools.py`）
 
-| 工具               | 参数                                         |
-| ------------------ | -------------------------------------------- |
-| `write_memory`     | content, tags, importance(enum), scope(enum) |
-| `read_memory`      | query, top_k(5), importance?, scope(enum)    |
-| `update_memory`    | id, scope, content?, tags?, importance?      |
-| `delete_memory`    | id, scope                                    |
-| `list_memory`      | limit, scope                                 |
-| `knowledge_list`   | —                                            |
-| `knowledge_read`   | kid, start_line?, end_line?                  |
-| `knowledge_create` | title, summary, body                         |
-| `knowledge_update` | kid, title?, summary?, body?                 |
-| `knowledge_delete` | kid                                          |
-| `knowledge_search` | query, top_k?                                |
+| 工具                | 参数                                         |
+| ------------------- | -------------------------------------------- |
+| `write_memory`      | content, tags, importance(enum), scope(enum) |
+| `read_memory`       | query, top_k(5), importance?, scope(enum)    |
+| `update_memory`     | id, scope, content?, tags?, importance?      |
+| `delete_memory`     | id, scope                                    |
+| `list_memory`       | limit, scope                                 |
+| `knowledge_list`    | —                                            |
+| `knowledge_read`    | kid, start_line?, end_line?                  |
+| `knowledge_search`  | query, top_k?                                |
+| `knowledge_suggest` | action, title, summary, body, reason         |
 
 ### 潜意识工具（`rethinking/tools.py`）
 
-记忆和 session/画像工具注册在隔离的 `_SUBCONSCIOUS_TOOLS` 上；知识工具通过双重注册同时暴露给表层和潜意识：
+记忆和 session/画像工具注册在隔离的 `_SUBCONSCIOUS_TOOLS` 上。知识库中 `list`/`read`/`search` 通过双重注册同时暴露给表层和潜意识；`create`/`update`/`delete` 仅潜意识可用（表层通过 `knowledge_suggest` 提交建议）：
 
 | 工具                             | 用途                                   |
 | -------------------------------- | -------------------------------------- |
@@ -213,6 +224,7 @@ flowchart LR
 | `subconscious_knowledge_create`  | 创建知识条目                           |
 | `subconscious_knowledge_update`  | 更新知识条目                           |
 | `subconscious_knowledge_delete`  | 删除知识条目                           |
+| `subconscious_read_suggestions`  | 读取待审查的知识建议（读取后清空）     |
 | `subconscious_knowledge_search`  | 语义搜索知识库                         |
 | `subconscious_read_sessions`     | 读取归档 sessions（LLM 摘要）          |
 | `subconscious_get_profile`       | 读取用户画像（行滑动窗口）             |
@@ -274,8 +286,9 @@ $$\text{delay} = \min(\text{base} \times \text{multiplier}^{\text{penalty}-1},\ 
 
 `SubconsciousRunner` 将 ChatObject 作为数据容器，注入自定义 `SubconsciousBackend` + Core `ReActAgentStrategy`：
 
-```
-LOAD_STATE → JINJA2_RENDER → LIMITING_MEMORY → BUILD_MESSAGE → REACT_BLOCK
+```mermaid
+flowchart TD
+    LOAD_STATE --> JINJA2_RENDER --> LIMITING_MEMORY --> BUILD_MESSAGE --> REACT_BLOCK
 ```
 
 `LIMITING_MEMORY` 在 Agent Loop 之前运行 Core `MemoryLimiter`：消息截断 → 摘要生成。`_build_config()` 将 `enable_memory_compress` 和 `loop_detect_threshold` 注入 `AmritaConfig`。
@@ -327,27 +340,27 @@ knowledge_collection_name = "amrita_global_knowledge"
 enable_knowledge = true
 ```
 
-| 字段                         | 默认值                                 | 说明                               |
-| ---------------------------- | -------------------------------------- | ---------------------------------- |
-| `enabled`                    | `false`                                | 是否启用潜意识循环                 |
-| `target_user_id`             | `""`                                   | 目标用户 ID，为空则不启动          |
-| `allowed_tools`              | `[]`                                   | 额外可用工具（从全局拉取）         |
-| `max_iterations`             | `10`                                   | 单轮 ReAct 最大步数（预留）        |
-| `loop_detect_threshold`      | `3`                                    | 传入 Core `loop_reasoning_trigger` |
-| `rethink_base_delay_minutes` | `30`                                   | 惩罚退避基数                       |
-| `rethink_penalty_multiplier` | `1.5`                                  | 惩罚指数倍率                       |
-| `rethink_max_delay_minutes`  | `1440`                                 | 惩罚延迟上限（1 天）               |
-| `prompt_file`                | `"prompt/subconscious_main.md.jinja2"` | 主推理提示词模板                   |
-| `prompt_send_file`           | `"prompt/subconscious_send.md.jinja2"` | 主动消息生成模板                   |
-| `prompt_knowledge_file`      | `"prompt/knowledge_guide.md.jinja2"`   | 知识库使用指南                     |
-| `prompt_profile_file`        | `"prompt/profile_guide.md.jinja2"`     | 画像构建指南                       |
-| `enable_memory_compress`     | `true`                                 | 传入 Core `enable_memory_abstract` |
-| `allow_send_to_user`         | `false`                                | 允许 Agent 主动发私聊消息          |
-| `memory_warn_threshold`      | `100`                                  | ChromaDB 超此数量注入压缩提示      |
-| `max_abstracts`              | `5`                                    | 摘要滑动窗口大小                   |
-| `knowledge_max_chars`        | `10000`                                | 知识条目单条正文上限               |
-| `knowledge_collection_name`  | `"amrita_global_knowledge"`            | ChromaDB 知识库 collection         |
-| `enable_knowledge`           | `true`                                 | 是否启用全局知识库                 |
+| 字段                         | 默认值                                 | 说明                                    |
+| ---------------------------- | -------------------------------------- | --------------------------------------- |
+| `enabled`                    | `false`                                | 是否启用潜意识循环                      |
+| `target_user_id`             | `""`                                   | 目标用户 ID，为空则不启动               |
+| `allowed_tools`              | `[]`                                   | 额外可用工具（从全局拉取）              |
+| `max_iterations`             | `10`                                   | 单轮 ReAct 最大步数（预留）             |
+| `loop_detect_threshold`      | `3`                                    | 传入 Core `loop_reasoning_trigger`      |
+| `rethink_base_delay_minutes` | `30`                                   | 惩罚退避基数                            |
+| `rethink_penalty_multiplier` | `1.5`                                  | 惩罚指数倍率                            |
+| `rethink_max_delay_minutes`  | `1440`                                 | 惩罚延迟上限（1 天）                    |
+| `prompt_file`                | `"prompt/subconscious_main.md.jinja2"` | 主推理提示词模板                        |
+| `prompt_send_file`           | `"prompt/subconscious_send.md.jinja2"` | 主动消息生成模板                        |
+| `prompt_knowledge_file`      | `"prompt/knowledge_guide.md.jinja2"`   | 知识库使用指南                          |
+| `prompt_profile_file`        | `"prompt/profile_guide.md.jinja2"`     | 画像构建指南                            |
+| `enable_memory_compress`     | `true`                                 | 传入 Core `enable_memory_abstract`      |
+| `allow_send_to_user`         | `false`                                | 允许 Agent 主动发私聊消息               |
+| `memory_warn_threshold`      | `100`                                  | ChromaDB 超此数量注入压缩提示           |
+| `max_abstracts`              | `5`                                    | 摘要滑动窗口大小                        |
+| `knowledge_max_chars`        | `10000`                                | 知识条目单条正文上限                    |
+| `knowledge_collection_name`  | `"amrita_global_knowledge"`            | ChromaDB 知识库 collection              |
+| `enable_knowledge`           | `true`                                 | 是否启用全局知识库（需 `enabled=true`） |
 
 ### 提示词模板
 
@@ -357,8 +370,8 @@ enable_knowledge = true
 | ----------------------------- | ------------ | ------------------------------------------------------------------------------------------------ |
 | `subconscious_main.md.jinja2` | 主推理提示词 | `character_prompt`, `last_run`, `last_abstracts`, `current_time`, `target_user_id`, `total_runs` |
 | `subconscious_send.md.jinja2` | 主动消息生成 | `character_prompt`, `intent`, `memory_context`, `current_time`                                   |
-| `knowledge_guide.md.jinja2`   | 知识库指南   | 无（纯静态文本，注入主 prompt 末尾）                                                             |
-| `profile_guide.md.jinja2`     | 画像构建指南 | 无（纯静态文本，注入主 prompt 末尾）                                                             |
+| `knowledge_guide.md.jinja2`   | 知识库指南   | `current_time`, `target_user_id`                                                                 |
+| `profile_guide.md.jinja2`     | 画像构建指南 | `current_time`, `target_user_id`                                                                 |
 
 ### 环境变量（`.env`）
 

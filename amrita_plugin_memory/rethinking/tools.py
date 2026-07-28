@@ -27,11 +27,13 @@ from .schemas import (
     KNOWLEDGE_LIST_SCHEMA,
     KNOWLEDGE_READ_SCHEMA,
     KNOWLEDGE_SEARCH_SCHEMA,
+    KNOWLEDGE_SUGGEST_SCHEMA,
     KNOWLEDGE_UPDATE_SCHEMA,
     LIST_MEMORY_SCHEMA,
     READ_CHAT_CONTEXT_SCHEMA,
     READ_MEMORY_SCHEMA,
     READ_SESSIONS_SCHEMA,
+    READ_SUGGESTIONS_SCHEMA,
     SEND_TO_USER_SCHEMA,
     UPDATE_MEMORY_SCHEMA,
     UPDATE_PROFILE_SCHEMA,
@@ -487,8 +489,14 @@ def _get_kb_manager():
     runner = _state.get_runner()
     if runner is None:
         raise RuntimeError("SubconsciousRunner not initialized")
-    if not runner._config.enable_knowledge or runner._kb_manager is None:
-        raise RuntimeError("全局知识库未启用（enable_knowledge=false）")
+    if (
+        not runner._config.enabled
+        or not runner._config.enable_knowledge
+        or runner._kb_manager is None
+    ):
+        raise RuntimeError(
+            "全局知识库未启用（enabled=false 或 enable_knowledge=false）"
+        )
     return runner._kb_manager
 
 
@@ -530,7 +538,6 @@ async def subconscious_knowledge_read(data: dict[str, Any]) -> str:
         return _tools_err(str(e))
 
 
-@on_tools(KNOWLEDGE_CREATE_SCHEMA, strict=True)
 @on_tools(KNOWLEDGE_CREATE_SCHEMA, strict=True, bound_to=_SUBCONSCIOUS_TOOLS)
 async def subconscious_knowledge_create(data: dict[str, Any]) -> str:
     try:
@@ -551,7 +558,6 @@ async def subconscious_knowledge_create(data: dict[str, Any]) -> str:
         return _tools_err(str(e))
 
 
-@on_tools(KNOWLEDGE_UPDATE_SCHEMA, strict=True)
 @on_tools(KNOWLEDGE_UPDATE_SCHEMA, strict=True, bound_to=_SUBCONSCIOUS_TOOLS)
 async def subconscious_knowledge_update(data: dict[str, Any]) -> str:
     try:
@@ -580,7 +586,6 @@ async def subconscious_knowledge_update(data: dict[str, Any]) -> str:
         return _tools_err(str(e))
 
 
-@on_tools(KNOWLEDGE_DELETE_SCHEMA, strict=True)
 @on_tools(KNOWLEDGE_DELETE_SCHEMA, strict=True, bound_to=_SUBCONSCIOUS_TOOLS)
 async def subconscious_knowledge_delete(data: dict[str, Any]) -> str:
     try:
@@ -614,6 +619,60 @@ async def subconscious_knowledge_search(data: dict[str, Any]) -> str:
             f"knowledge_search error: {e}"
         )
         return _tools_err(str(e))
+
+
+#  知识建议（对话 LLM → 潜意识 Agent 审查管线）
+
+
+@on_tools(KNOWLEDGE_SUGGEST_SCHEMA, strict=True)
+async def knowledge_suggest(data: dict[str, Any]) -> str:
+    """对话 LLM 提交知识建议，加入队列等待潜意识 Agent 审查。"""
+    action = str(data["action"])
+    suggestion = {
+        "action": action,
+        "title": str(data["title"]),
+        "summary": str(data["summary"]),
+        "body": str(data["body"]),
+        "reason": str(data.get("reason", "")),
+        "kid": str(data["kid"]) if action == "update" and data.get("kid") else "",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+    _state.add_knowledge_suggestion(suggestion)
+    # 触发持久化
+    runner = _state.get_runner()
+    if runner is not None:
+        await runner._save_pending_to_repo()
+    logger.info(
+        f"[Subconscious] Knowledge suggestion queued: "
+        f"action={action}, title={suggestion['title'][:50]}"
+    )
+    return _tools_ok(
+        message=(
+            "知识建议已提交，后台记忆管家将在下一轮推理中审查。"
+            if action == "create"
+            else "更新建议已提交，后台记忆管家将在下一轮推理中审查。"
+        ),
+        action=action,
+    )
+
+
+@on_tools(READ_SUGGESTIONS_SCHEMA, strict=True, bound_to=_SUBCONSCIOUS_TOOLS)
+async def subconscious_read_suggestions(data: dict[str, Any]) -> str:
+    """潜意识 Agent 读取待审查的知识建议并清空队列。"""
+    suggestions = list(_state.get_knowledge_suggestions())
+    _state.set_knowledge_suggestions([])
+    # 持久化空队列
+    runner = _state.get_runner()
+    if runner is not None:
+        await runner._save_pending_to_repo()
+    logger.info(
+        f"[Subconscious] Read {len(suggestions)} knowledge suggestions, queue cleared"
+    )
+    return json.dumps(
+        {"status": "success", "suggestions": suggestions, "total": len(suggestions)},
+        ensure_ascii=False,
+        indent=2,
+    )
 
 
 #  Session 与用户画像工具
