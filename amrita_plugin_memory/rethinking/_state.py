@@ -23,9 +23,12 @@ _SUBCONSCIOUS_TOOLS = MultiToolsManager()
 
 
 async def get_preset() -> ModelPreset:
-    return await config_manager.get_preset(
-        (await config_manager.safe_get_config()).preset
+    preset = await config_manager.get_preset(
+        (await config_manager.safe_get_config()).preset, fix=True
     )
+    if preset is None:
+        raise RuntimeError("No model preset available")
+    return preset
 
 
 def get_runner() -> SubconsciousRunner | None:
