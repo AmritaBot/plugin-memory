@@ -7,6 +7,7 @@ from nonebot.exception import FinishedException
 from nonebot.matcher import Matcher
 from nonebot.params import CommandArg
 
+from .keys import make_scope_id
 from .vector import AsyncUserMemory, get_db_conn
 
 memory_cmd = on_command(
@@ -40,13 +41,13 @@ async def _(
     if isinstance(event, GroupMessageEvent):
         available_scopes = {"group", "user"}
         partitions = {
-            "group": f"group_{event.group_id}",
-            "user": f"user_{event.user_id}",
+            "group": make_scope_id(event.group_id, is_group=True),
+            "user": make_scope_id(event.user_id, is_group=False),
         }
         role = event.sender.role if event.sender else "member"
     else:
         available_scopes = {"user"}
-        partitions = {"user": f"user_{event.user_id}"}
+        partitions = {"user": make_scope_id(event.user_id, is_group=False)}
         role = None
 
     # 解析子命令: /memory [scope] [action] [args...]
@@ -149,15 +150,16 @@ async def _handle_search(
         raw_dist = res.get("distances")
         distances: list[float] = raw_dist[0] if raw_dist else []
 
-        lines = [f"🔍 {_label(scope)} 搜索「{query}」结果:"]
+        lines = [f"🔍 {_label(scope)} 搜索「{query}」结果（距离越小越相似）:"]
         for i, doc_id in enumerate(flat_ids):
             meta = flat_metas[i] if i < len(flat_metas) else {}
             doc = flat_docs[i] if i < len(flat_docs) else ""
-            dist = distances[i] if i < len(distances) else 0.0
+            dist = distances[i] if i < len(distances) else None
+            dist_text = f"{dist:.4f}" if dist is not None else "-"
             preview = doc[:50] + "..." if len(doc) > 50 else doc
             lines.append(
                 f"[{meta.get('importance', '-')}] [{doc_id}] "
-                f"{preview} | tag: {meta.get('tags', '-')} | score: {dist:.3f}"
+                f"{preview} | tag: {meta.get('tags', '-')} | 距离: {dist_text}"
             )
 
         await matcher.finish("\n".join(lines))

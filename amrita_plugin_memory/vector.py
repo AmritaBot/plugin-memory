@@ -36,6 +36,10 @@ from pytz import utc
 from .config import VECTOR_DB_PATH, build_preset, env_config
 
 T = TypeVar("T")
+
+MEMORY_COLLECTION_NAME = "amrita_user_memory"
+"""L2 向量记忆集合名"""
+
 _collection_lock_pool: defaultdict[str, WeakValueLRUCache[str, aiologic.Lock]] = (
     defaultdict(lambda: WeakValueLRUCache(capacity=1024, loose_mode=True))
 )
@@ -314,13 +318,13 @@ class MemoryMetadata(BaseModel):
 
 class AsyncUserMemory:
     api: WrappedClientAPI
-    _collection_name: str = "amrita_user_memory"
+    _collection_name: str = MEMORY_COLLECTION_NAME
     _collection: Collection
 
     def __init__(
         self,
         client: ClientAPI,
-        collection_name: str = "amrita_user_memory",
+        collection_name: str = MEMORY_COLLECTION_NAME,
     ) -> None:
         self.api = WrappedClientAPI(client)
         self._collection_name = collection_name
@@ -399,7 +403,7 @@ class AsyncUserMemory:
         query_text: str,
         importance: Literal["low", "medium", "high"] | None = None,
         top_k: int = 5,
-        include: chromadb.Include = ["metadatas", "documents"],
+        include: chromadb.Include = ["metadatas", "documents", "distances"],
     ) -> chromadb.QueryResult:
         async with get_lock(self._collection_name, user_id):
             query_vector = await call_embedding([query_text], build_preset())

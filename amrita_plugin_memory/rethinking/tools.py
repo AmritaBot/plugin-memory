@@ -13,6 +13,7 @@ from chromadb import GetResult
 from jinja2 import Template
 from nonebot import logger
 
+from ..keys import make_scope_id
 from ..vector import AsyncUserMemory, MemoryMetadata, get_db_conn
 from . import _state
 from .consts import DEFAULT_SEND_PROMPT, ensure_prompt_file, load_character_prompt
@@ -53,7 +54,7 @@ def _get_partition_id() -> str:
     uid = _state.get_target_user_id()
     if not uid:
         raise RuntimeError("target_user_id not configured")
-    return f"user_{uid}"
+    return make_scope_id(uid, is_group=False)
 
 
 def _tools_err(message: str) -> str:
@@ -287,7 +288,7 @@ async def subconscious_read_chat_context(data: dict[str, Any]) -> str:
         from nonebot_plugin_amrita.memory import CachedUserDataRepository
 
         repo = CachedUserDataRepository()
-        mem = await repo.get_memory(f"user_{user_id}")
+        mem = await repo.get_memory(make_scope_id(user_id, is_group=False))
         messages = mem.memory_json.messages
         recent = messages[-limit:] if len(messages) > limit else messages
         return json.dumps(

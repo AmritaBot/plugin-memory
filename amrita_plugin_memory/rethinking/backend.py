@@ -41,8 +41,7 @@ class SubconsciousBackend(AbilityBackend, MemoryBackend):
             self._register_tools()
 
     def _register_tools(self) -> None:
-        # 所有工具已通过 @on_tools(bound_to=_state.get_tools_manager()) 注册到隔离的 MultiToolsManager
-        # 这里只需拉取它们的 ToolData 用于 debug 校验
+        # 所有工具已通过 @on_tools(bound_to=_state.get_tools_manager()) 注册到隔离的 MultiToolsManager，这里只需拉取它们的 ToolData 用于 debug 校验
         self._tools_manager = _state.get_tools_manager()
         # allowed_tools 从全局 ToolsManager 拉取额外工具
         gm = _get_global_tools()

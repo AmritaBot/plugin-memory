@@ -8,6 +8,7 @@ dependencies = [
     "amrita-core>=0.8.5",
     "amrita>=1.3",
     "chromadb>=1.5.8",
+    "click>=8.1",
     "nonebot-plugin-amrita>=0.3.0",
     "nonebot-plugin-apscheduler>=0.5.0",
     "nonebot-plugin-localstore>=0.7.4",
@@ -15,6 +16,12 @@ dependencies = [
 ]
 readme = "README.md"
 requires-python = ">=3.10, <3.14"
+
+[project.entry-points."ambot.commands"]
+# [full_load] 是 ambot-inlinectl 认识的 extra：命令真正被调用时，
+# 它会先 amrita.init() + amrita.load_plugins() 再加载本命令。
+# 因为 amrita_plugin_memory 包在插件加载器之外无法 import。
+memory = "amrita_plugin_memory.cli:memory [full_load]"
 
 [tool.nonebot]
 plugins = [
@@ -34,7 +41,8 @@ module_name = "nonebot.adapters.onebot.v11"
 dev-dependencies = [
     "ruff>=0.12.8",
     #"pytest>=8.4.1",
-    "ambot-inlinectl>=0.1.2",
+    # `ambot memory` 依赖 0.2.1 起的 entry point extras（[full_load]）支持
+    "ambot-inlinectl>=0.2.1",
 ]
 package = true
 

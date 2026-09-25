@@ -1,6 +1,6 @@
 import json
 from datetime import datetime
-from typing import Any, Literal, cast
+from typing import Any, cast
 
 from amrita.plugins.chat.runtime import AmritaBotContext
 from amrita.plugins.chat.utils.sql import get_uni_user_id
@@ -14,13 +14,11 @@ from amrita_core import (
 from chromadb import QueryResult
 from nonebot import logger
 from nonebot.adapters.onebot.v11 import Event as OB11Event
-from nonebot.adapters.onebot.v11 import GroupMessageEvent
 
 from .config import DataManager
+from .keys import Scope, resolve_scope_uni_id
 from .memo import MemoTooLongError, set_memo
 from .vector import AsyncUserMemory, MemoryMetadata, get_db_conn
-
-Scope = Literal["group", "user"]  # type alias
 
 
 def _get_event(ctx: ToolContext) -> OB11Event:
@@ -31,23 +29,12 @@ def _get_event(ctx: ToolContext) -> OB11Event:
 
 
 def _resolve_scope_id(ctx: ToolContext, scope: str) -> str:
-    """根据 scope 返回对应的分区 key
+    """根据 scope 返回对应的分区 key（框架 uni_id）
 
-    - scope="group": 群共享记忆，返回 f"group_{group_id}"
-    - scope="user":  用户专属记忆，返回 f"user_{user_id}"（群聊私聊互通）
+    - scope="group": 群共享记忆，返回 f"QQPlatform_Group_{group_id}"
+    - scope="user":  用户专属记忆，返回 f"QQPlatform_Private_{user_id}"（群聊私聊互通）
     """
-    event: OB11Event = _get_event(ctx)
-    if scope == "group":
-        if not isinstance(event, GroupMessageEvent):
-            raise ValueError("当前不在群聊中，无法使用群共享记忆")
-        return f"group_{event.group_id}"
-    elif scope == "user":
-        user_id = getattr(event, "user_id", None)
-        if user_id is None:
-            raise ValueError("Event has no user_id attribute")
-        return f"user_{user_id}"
-    else:
-        raise ValueError(f"无效的 scope: {scope}")
+    return resolve_scope_uni_id(_get_event(ctx), scope)
 
 
 def _make_operator() -> AsyncUserMemory:

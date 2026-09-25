@@ -149,6 +149,24 @@ class EnvConfig(BaseModel):
     embedding_model_api_key: str = Field(
         default="", description="Embedding模型API密钥(可选，默认为空)"
     )
+    embed_check_on_startup: bool = Field(
+        default=True,
+        description="启动时是否检查嵌入模型指纹（设为 false 可跳过，用于排查/迁移）",
+    )
+    embed_mismatch_policy: Literal["ask", "auto", "never"] = Field(
+        default="ask",
+        description=(
+            "嵌入模型变更时的处理策略："
+            "ask=交互确认(非 TTY 时拒绝加载插件)；auto=自动全量重映射；"
+            "never=仅告警并继续使用现有数据"
+        ),
+    )
+    reembed_batch_size: int = Field(
+        default=64, ge=1, le=1024, description="全量重映射时每批嵌入的文本条数"
+    )
+    reembed_backup_keep: int = Field(
+        default=3, ge=1, le=100, description="重映射前保留的历史备份份数"
+    )
 
 
 class DataManager(BaseDataManager[ConfigFile]):

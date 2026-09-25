@@ -30,6 +30,7 @@ from nonebot_plugin_orm import get_session
 from sqlalchemy import select
 
 from ..config import DATA_PATH, SubconsciousConfig
+from ..keys import make_scope_id
 from ..models import SubconsciousState
 from ..vector import AsyncUserMemory, get_db_conn
 from . import _state
@@ -422,7 +423,7 @@ class SubconsciousRunner:
 
         # Phase 3: 膨胀感知 — 查 ChromaDB 总量，超阈值注入警告
         try:
-            pid = f"user_{self._config.target_user_id}"
+            pid = make_scope_id(self._config.target_user_id, is_group=False)
             ope = AsyncUserMemory(get_db_conn())
             await ope.init()
             result = await ope.get_all_notes(pid, include=["metadatas"])
@@ -451,7 +452,7 @@ class SubconsciousRunner:
     async def _read_recent_sessions(self, n: int = 5) -> list[SessionSummary]:
         """读取目标用户最近 N 个归档 sessions，按需生成摘要并缓存。"""
         try:
-            uid = f"user_{self._config.target_user_id}"
+            uid = make_scope_id(self._config.target_user_id, is_group=False)
             repo = CachedUserDataRepository()
             raw = await repo.get_sesssions(uid)
             if not raw:
