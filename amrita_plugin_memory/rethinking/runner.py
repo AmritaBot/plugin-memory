@@ -81,7 +81,6 @@ class SubconsciousRunner:
         self._kb_manager: KnowledgeBaseManager | None = None
         # session 摘要缓存（LRU）：session DB id -> 摘要文本，最多 128 条
         self._session_cache: LRUCache[int, str] = LRUCache(128)
-        # 用户画像文件
         self._profile_path = DATA_PATH / "user_profile.md"
 
     @property
@@ -94,8 +93,6 @@ class SubconsciousRunner:
         cfg.builtin.loop_reasoning_trigger = self._config.loop_detect_threshold
         cfg.llm.enable_memory_abstract = self._config.enable_memory_compress
         return cfg
-
-    #  生命周期
 
     async def start(self) -> None:
         logger.info(f"[Subconscious] Starting for user={self._config.target_user_id}")
@@ -149,8 +146,6 @@ class SubconsciousRunner:
             id=self._job_id,
             misfire_grace_time=30,
         )
-
-    #  核心运行
 
     async def _run(self) -> None:
         """调度入口 — 保证任何异常路径都会释放运行标志。"""
@@ -209,8 +204,6 @@ class SubconsciousRunner:
             preset.thinking_config is not None
             and preset.thinking_config.thinking_type == "enabled"
         )
-
-    #  后处理
 
     async def _post_process(self, chat_obj: ChatObject) -> None:
         """本轮结束后：提取摘要、更新全局 usage、持久化、调度下次运行。"""
@@ -274,8 +267,6 @@ class SubconsciousRunner:
             )
         except Exception as e:
             logger.warning(f"[Subconscious] Update global usage failed: {e}")
-
-    #  SubconsciousState 持久化
 
     @staticmethod
     async def _read_state_payload(uid: str) -> dict[str, Any]:
@@ -376,8 +367,6 @@ class SubconsciousRunner:
             },
         )
 
-    #  Prompt 加载
-
     async def _load_prompt(self) -> str:
         main_path = (self._prompt_dir / self._config.prompt_file).resolve()
         kn_path = (self._prompt_dir / self._config.prompt_knowledge_file).resolve()
@@ -421,7 +410,7 @@ class SubconsciousRunner:
                 f"审查后对值得保留的用 subconscious_knowledge_create/update 实际写入。"
             )
 
-        # Phase 3: 膨胀感知 — 查 ChromaDB 总量，超阈值注入警告
+        # 膨胀感知：查 ChromaDB 总量，超阈值注入警告
         try:
             pid = make_scope_id(self._config.target_user_id, is_group=False)
             ope = AsyncUserMemory(get_db_conn())
@@ -446,8 +435,6 @@ class SubconsciousRunner:
             logger.debug(f"[Subconscious] Memory stats query failed: {e}")
 
         return prompt
-
-    #  Session 读取 & 摘要缓存
 
     async def _read_recent_sessions(self, n: int = 5) -> list[SessionSummary]:
         """读取目标用户最近 N 个归档 sessions，按需生成摘要并缓存。"""
@@ -530,8 +517,6 @@ class SubconsciousRunner:
                 else f"[{date_str}] 无法生成摘要"
             )
 
-    #  用户画像
-
     async def _read_profile(
         self, start_line: int | None = None, end_line: int | None = None
     ) -> ProfileResult:
@@ -598,11 +583,9 @@ class SubconsciousRunner:
         body_lines = existing_body.split("\n") if existing_body else []
         new = new_lines.split("\n")
         if start_line is None or end_line is None:
-            # 追加模式
             new_body_lines = body_lines + new
             operation = f"append {len(new)} lines"
         else:
-            # 替换模式
             s = max(0, start_line)
             e = max(s, min(len(body_lines), end_line))
             new_body_lines = body_lines[:s] + new + body_lines[e:]

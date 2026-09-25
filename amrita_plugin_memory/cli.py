@@ -59,9 +59,6 @@ def _progress_printer() -> Any:
     return _progress
 
 
-#  status
-
-
 def cmd_status() -> None:
     """显示嵌入指纹、记忆分布与备份列表。"""
     collection = _get_collection()
@@ -118,9 +115,6 @@ def _print_scope_counts(collection: Collection) -> None:
         click.echo(f"  {scope_id}: {count}")
 
 
-#  reindex
-
-
 def cmd_reindex(*, assume_yes: bool = False) -> None:
     """用当前嵌入模型全量重映射。"""
     collection = _get_collection()
@@ -138,9 +132,6 @@ def cmd_reindex(*, assume_yes: bool = False) -> None:
     click.echo(f"完成，已重新嵌入 {done} 条记忆")
 
 
-#  migrate-keys
-
-
 def cmd_migrate_keys(*, dry_run: bool = False) -> None:
     """把分区键迁移到当前 Amrita 的 uni_id 格式。"""
     client = get_db_conn()
@@ -156,9 +147,6 @@ def cmd_migrate_keys(*, dry_run: bool = False) -> None:
         click.echo(f"完成，已改写 {changed} 条记忆的分区键")
 
 
-#  reset-fingerprint
-
-
 def cmd_reset_fingerprint() -> None:
     """只写入当前指纹、不重嵌入（逃生舱）。"""
     collection = _get_collection(create=True)
@@ -167,9 +155,6 @@ def cmd_reset_fingerprint() -> None:
     click.echo(f"已写入指纹: {compute_fingerprint()}")
     click.echo(f"  记录为: {describe_current()}")
     click.echo("⚠️  未重新嵌入 —— 若模型确实已变更，检索结果将不准确")
-
-
-#  backup
 
 
 def cmd_backup_list() -> None:
@@ -217,9 +202,6 @@ def cmd_backup_restore(file: str) -> None:
     click.echo(f"从 {path.name} 恢复 {info.get('count', '?')} 条记忆")
     done = _run(restore_from_backup(path, progress=_progress_printer()))
     click.echo(f"完成，已恢复 {done} 条记忆")
-
-
-#  click 命令组
 
 
 @click.group()

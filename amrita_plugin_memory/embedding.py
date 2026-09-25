@@ -99,9 +99,6 @@ def describe_stored(collection: Collection) -> str:
     return f"{protocol} / {model} @ {base_url}"
 
 
-#  备份
-
-
 def _prune_backups(keep: int) -> None:
     backups = sorted(BACKUP_DIR.glob("embed_backup_*.json"))
     for stale in backups[:-keep] if keep > 0 else backups:
@@ -129,9 +126,6 @@ def backup_collection(collection: Collection) -> Path:
 
 def list_backups() -> list[Path]:
     return sorted(BACKUP_DIR.glob("embed_backup_*.json"))
-
-
-#  全量重映射
 
 
 async def _write_in_batches(
@@ -265,9 +259,6 @@ def _run_async(coro: Any) -> Any:
     )
 
 
-#  启动检查
-
-
 def _confirm_reindex(reason: str, stored_desc: str) -> bool:
     """交互确认；非 TTY 时抛出 _RefuseToLoad。"""
     if not sys.stdin.isatty():
@@ -322,7 +313,6 @@ def _check_fingerprint(collection: Collection) -> None:
         _do_reindex_with_progress()
         return
 
-    # policy == "ask"
     stored_desc = describe_stored(collection) if stored else "（无记录）"
     if not _confirm_reindex(reason, stored_desc):
         logger.warning("[Memory] 用户拒绝重映射，保持现有数据不变。")

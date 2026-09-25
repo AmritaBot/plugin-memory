@@ -145,7 +145,6 @@ READ_CHAT_CONTEXT_SCHEMA = FunctionDefinitionSchema(
     ),
 )
 
-# 工具注册常量
 
 DUPLICATE_HELPER_SCHEMA = FunctionDefinitionSchema(
     name="subconscious_duplicate_helper",
@@ -183,7 +182,6 @@ GET_MEMORY_STATS_SCHEMA = FunctionDefinitionSchema(
     parameters=FunctionParametersSchema(type="object", properties={}, required=[]),
 )
 
-#  全局知识库工具
 
 KNOWLEDGE_LIST_SCHEMA = FunctionDefinitionSchema(
     name="subconscious_knowledge_list",
@@ -281,7 +279,7 @@ KNOWLEDGE_SEARCH_SCHEMA = FunctionDefinitionSchema(
     ),
 )
 
-#  知识建议（对话 LLM 提议，潜意识 Agent 审查后实际写入）
+# 知识建议：对话 LLM 提议，潜意识 Agent 审查后实际写入
 
 KNOWLEDGE_SUGGEST_SCHEMA = FunctionDefinitionSchema(
     name="knowledge_suggest",
@@ -328,7 +326,6 @@ READ_SUGGESTIONS_SCHEMA = FunctionDefinitionSchema(
     parameters=FunctionParametersSchema(type="object", properties={}, required=[]),
 )
 
-#  Session 与用户画像工具
 
 READ_SESSIONS_SCHEMA = FunctionDefinitionSchema(
     name="subconscious_read_sessions",

@@ -1,12 +1,12 @@
 """L2 向量层分区键 — 统一跟随已安装 Amrita 的 uni_id 格式。
 
-Amrita 的会话 ID 格式随版本演进：
+Amrita 的会话 ID 存在以下两种格式，本模块需要同时识别：
 
-- 旧版（≤1.9.x）：``user_{qq}`` / ``group_{群号}``
-- 新版（开发中）：``QQPlatform_Private_{qq}`` / ``QQPlatform_Group_{群号}``
+- ``user_{qq}`` / ``group_{群号}``
+- ``QQPlatform_Private_{qq}`` / ``QQPlatform_Group_{群号}``
 
 本模块**不硬编码任一格式**，而是委托框架的 ``make_uni_id`` 生成，
-并提供一个能识别两种历史格式的解析器，用于存量数据的 Key 迁移。
+并提供一个能识别两种格式的解析器，用于存量数据的 Key 迁移。
 """
 
 from __future__ import annotations
@@ -22,14 +22,14 @@ from nonebot.adapters.onebot.v11 import Event as OB11Event
 
 Scope = Literal["group", "user"]
 
-#  集合 metadata 中的 Key 体系版本号，用于幂等迁移
+# 集合 metadata 中的 Key 体系版本号，用于幂等迁移
 KEY_SCHEMA_VERSION = 2
 KEY_SCHEMA_VERSION_META = "key_schema_version"
 
 _GROUP_KINDS = {"group", "Group"}
 _PRIVATE_KINDS = {"user", "Private"}
 
-#  同时匹配新旧两种格式（可选平台前缀 + 类型 + 数字 payload）
+# 同时匹配两种格式（可选平台前缀 + 类型 + 数字 payload）
 _ANY_ID_RE = re.compile(
     r"^(?:[A-Za-z0-9]+_)?(?P<kind>Private|Group|Channel|user|group)_(?P<payload>[0-9]+)$"
 )
