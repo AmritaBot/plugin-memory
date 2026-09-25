@@ -26,8 +26,11 @@ from nonebot_plugin_amrita.cache import LRUCache
 from nonebot_plugin_amrita.database import InsightsModel
 from nonebot_plugin_amrita.memory import CachedUserDataRepository, MemorySessionsSchema
 from nonebot_plugin_apscheduler import scheduler
+from nonebot_plugin_orm import get_session
+from sqlalchemy import select
 
 from ..config import DATA_PATH, SubconsciousConfig
+from ..models import SubconsciousState
 from ..vector import AsyncUserMemory, get_db_conn
 from . import _state
 from .backend import SubconsciousBackend
@@ -43,9 +46,12 @@ from .knowledge import KnowledgeBaseManager
 from .nodes import LIMITING_MEMORY
 from .types import ProfileResult, SessionSummary
 
-_REPO_UID = "amrita_memory"
+_STATE_UID = "amrita_memory"
+_LEGACY_REPO_UID = (
+    "amrita_memory"  # 旧版本元状态占用的 Bot Memory 表 uid（仅用于升级迁移）
+)
 
-# 工作流 = 加载状态 → Jinja2 渲染 → 记忆限幅 → 构建消息 → ReAct 循环
+# 工作流 = 加载状态 -> Jinja2 渲染 -> 记忆限幅 -> 构建消息 -> ReAct 循环
 _WORKFLOW = (
     LOAD_STATE >> JINJA2_RENDER >> LIMITING_MEMORY >> BUILD_MESSAGE >> REACT_BLOCK
 ).render()
@@ -59,7 +65,7 @@ class SubconsciousRunner:
 
     使用 ChatObject 作为数据容器 + 标准 Agent 框架（ReActAgentStrategy）。
     LIMITING_MEMORY 节点在 Agent Loop 之前运行 MemoryLimiter 压缩会话消息。
-    持久化使用 CachedUserDataRepository（amrita_memory）。
+    元状态持久化使用独立的 SubconsciousState 表。
     """
 
     def __init__(self, config: SubconsciousConfig) -> None:
@@ -72,7 +78,7 @@ class SubconsciousRunner:
         self._backend = SubconsciousBackend(config)
         self._chat_obj: ChatObject | None = None
         self._kb_manager: KnowledgeBaseManager | None = None
-        # session 摘要缓存（LRU）：session DB id → 摘要文本，最多 128 条
+        # session 摘要缓存（LRU）：session DB id -> 摘要文本，最多 128 条
         self._session_cache: LRUCache[int, str] = LRUCache(128)
         # 用户画像文件
         self._profile_path = DATA_PATH / "user_profile.md"
@@ -92,7 +98,7 @@ class SubconsciousRunner:
 
     async def start(self) -> None:
         logger.info(f"[Subconscious] Starting for user={self._config.target_user_id}")
-        await self._load_from_repo()
+        await self._load_state()
         # 确保 prompt 目录和 README 存在
         readme_path = self._prompt_dir / "prompt" / "README.md"
         ensure_prompt_file(readme_path, PROMPT_README)
@@ -146,11 +152,17 @@ class SubconsciousRunner:
     #  核心运行
 
     async def _run(self) -> None:
+        """调度入口 — 保证任何异常路径都会释放运行标志。"""
         if self._is_running:
             logger.warning("[Subconscious] Already running, skip")
             return
         self._is_running = True
+        try:
+            await self._run_cycle()
+        finally:
+            self._is_running = False
 
+    async def _run_cycle(self) -> None:
         preset = await _state.get_preset()
         prompt_text = await self._load_prompt()
         user_msg_text = (
@@ -186,7 +198,6 @@ class SubconsciousRunner:
             )
         finally:
             self._chat_obj = None
-            self._is_running = False
 
         # MemoryLimiter 在 workflow 中已经产出 chat_obj._di_memory.memory.abstract
         await self._post_process(chat_obj)
@@ -219,14 +230,9 @@ class SubconsciousRunner:
         # 先持久化，任一失败则不重置惩罚（保留重试机会）
         save_ok = True
         try:
-            await self._save_to_repo()
+            await self._save_state()
         except Exception as e:
-            logger.warning(f"[Subconscious] Save to repo failed: {e}")
-            save_ok = False
-        try:
-            await self._save_pending_to_repo()
-        except Exception as e:
-            logger.warning(f"[Subconscious] Save pending failed: {e}")
+            logger.warning(f"[Subconscious] Save state failed: {e}")
             save_ok = False
 
         if save_ok:
@@ -268,85 +274,106 @@ class SubconsciousRunner:
         except Exception as e:
             logger.warning(f"[Subconscious] Update global usage failed: {e}")
 
-    #  CachedUserDataRepository 持久化
+    #  SubconsciousState 持久化
 
-    async def _load_from_repo(self) -> None:
-        """从 CachedUserDataRepository 恢复状态。"""
+    @staticmethod
+    async def _read_state_payload(uid: str) -> dict[str, Any]:
+        async with get_session() as session:
+            row = (
+                await session.execute(
+                    select(SubconsciousState).where(SubconsciousState.uid == uid)
+                )
+            ).scalar_one_or_none()
+        if row is None:
+            return {}
+        try:
+            return json.loads(row.payload)
+        except json.JSONDecodeError:
+            return {}
+
+    @staticmethod
+    async def _write_state_payload(uid: str, payload: dict[str, Any]) -> None:
+        text = json.dumps(payload, ensure_ascii=False)
+        async with get_session() as session:
+            async with session.begin():
+                row = (
+                    await session.execute(
+                        select(SubconsciousState).where(SubconsciousState.uid == uid)
+                    )
+                ).scalar_one_or_none()
+                if row is None:
+                    session.add(SubconsciousState(uid=uid, payload=text))
+                else:
+                    row.payload = text
+                    row.updated_at = datetime.now()
+
+    async def _load_state(self) -> None:
+        """从 SubconsciousState 表恢复状态，必要时迁移旧版本数据。"""
+        try:
+            payload = await self._read_state_payload(_STATE_UID)
+            if not payload:
+                payload = await self._migrate_legacy_state()
+            if not payload:
+                return
+            self._total_runs = int(payload.get("total_runs", 0))
+            abstracts = payload.get("last_abstracts", [])
+            self._last_abstracts = (
+                [str(a) for a in abstracts][: self._config.max_abstracts]
+                if isinstance(abstracts, list)
+                else []
+            )
+            pending = payload.get("pending_messages", [])
+            if isinstance(pending, list):
+                _state.set_pending(pending)
+            suggestions = payload.get("knowledge_suggestions", [])
+            if isinstance(suggestions, list):
+                _state.set_knowledge_suggestions(suggestions)
+        except Exception as e:
+            logger.warning(f"[Subconscious] Load state failed: {e}")
+
+    async def _migrate_legacy_state(self) -> dict[str, Any]:
+        """迁移旧版本挪用的 Bot Memory 表元状态（extra_prompt/memory_json）。"""
+        payload: dict[str, Any] = {}
         try:
             repo = CachedUserDataRepository()
-            mem = await repo.get_memory(_REPO_UID)
-            # extra_prompt 存 JSON 元状态
+            mem = await repo.get_memory(_LEGACY_REPO_UID)
             if mem.extra_prompt:
                 data: dict[str, Any] = json.loads(mem.extra_prompt)
-                self._total_runs = int(data.get("total_runs", 0))
-                self._last_abstracts = data.get("last_abstracts", [])
-                if isinstance(self._last_abstracts, list):
-                    self._last_abstracts = [str(a) for a in self._last_abstracts][
-                        : self._config.max_abstracts
-                    ]
-                else:
-                    self._last_abstracts = []
-                # 恢复待发送消息
+                payload["total_runs"] = int(data.get("total_runs", 0))
+                abstracts = data.get("last_abstracts", [])
+                payload["last_abstracts"] = (
+                    [str(a) for a in abstracts][: self._config.max_abstracts]
+                    if isinstance(abstracts, list)
+                    else []
+                )
                 pending = data.get("pending_messages", [])
                 if isinstance(pending, list):
-                    _state.set_pending(pending)
-                # 恢复知识建议队列
+                    payload["pending_messages"] = pending
                 suggestions = data.get("knowledge_suggestions", [])
                 if isinstance(suggestions, list):
-                    _state.set_knowledge_suggestions(suggestions)
-            # memory_json.abstract 用于 Core Jinja2 模板的 <SUMMARY> 注入
-            if mem.memory_json.abstract:
-                # 确保 abstract 也在 last_abstracts 中（兜底）
-                if (
-                    not self._last_abstracts
-                    or self._last_abstracts[-1] != mem.memory_json.abstract
-                ):
-                    self._last_abstracts.append(mem.memory_json.abstract)
-                    if len(self._last_abstracts) > self._config.max_abstracts:
-                        self._last_abstracts.pop(0)
+                    payload["knowledge_suggestions"] = suggestions
+            if mem.memory_json.abstract and not payload.get("last_abstracts"):
+                payload["last_abstracts"] = [mem.memory_json.abstract]
         except Exception as e:
-            logger.warning(f"[Subconscious] Load from repo failed: {e}")
+            logger.warning(f"[Subconscious] Legacy state migrate failed: {e}")
+            return {}
+        if payload:
+            await self._write_state_payload(_STATE_UID, payload)
+            logger.info("[Subconscious] Migrated legacy state to SubconsciousState")
+        return payload
 
-    async def _save_to_repo(self) -> None:
-        """保存状态到 CachedUserDataRepository。"""
-        try:
-            repo = CachedUserDataRepository()
-            mem = await repo.get_memory(_REPO_UID)
-            latest_abstract = self._last_abstracts[-1] if self._last_abstracts else ""
-            mem.memory_json.abstract = latest_abstract
-            mem.extra_prompt = json.dumps(
-                {
-                    "total_runs": self._total_runs,
-                    "last_run_time": datetime.now(timezone.utc).isoformat(),
-                    "last_abstracts": self._last_abstracts,
-                },
-                ensure_ascii=False,
-            )
-            await repo.update_memory_data(mem)
-        except Exception as e:
-            logger.opt(exception=e, colors=True, raw=True).exception(
-                f"[Subconscious] Save to repo failed: {e}"
-            )
-
-    async def _save_pending_to_repo(self) -> None:
-        """持久化待发送消息到 CachedUserDataRepository 的 extra_prompt 中。"""
-        try:
-            repo = CachedUserDataRepository()
-            mem = await repo.get_memory(_REPO_UID)
-            existing: dict[str, Any] = {}
-            if mem.extra_prompt:
-                try:
-                    existing = json.loads(mem.extra_prompt)
-                except json.JSONDecodeError:
-                    pass
-            existing["pending_messages"] = _state.get_pending()
-            existing["knowledge_suggestions"] = _state.get_knowledge_suggestions()
-            mem.extra_prompt = json.dumps(existing, ensure_ascii=False)
-            await repo.update_memory_data(mem)
-        except Exception as e:
-            logger.opt(exception=e, colors=True, raw=True).exception(
-                f"[Subconscious] Save pending failed: {e}"
-            )
+    async def _save_state(self) -> None:
+        """保存元状态到 SubconsciousState 表。"""
+        await self._write_state_payload(
+            _STATE_UID,
+            {
+                "total_runs": self._total_runs,
+                "last_run_time": datetime.now(timezone.utc).isoformat(),
+                "last_abstracts": self._last_abstracts,
+                "pending_messages": _state.get_pending(),
+                "knowledge_suggestions": _state.get_knowledge_suggestions(),
+            },
+        )
 
     #  Prompt 加载
 
@@ -492,7 +519,7 @@ class SubconsciousRunner:
             memory,
             Message(role="system", content=""),
         ) as lim:
-            # 把所有消息放入 dropped_part → 触发全量摘要
+            # 把所有消息放入 dropped_part -> 触发全量摘要
             lim._dropped_messages = list(memory.messages)
             memory.messages = []
             await lim._make_abstract()
@@ -557,7 +584,7 @@ class SubconsciousRunner:
     ) -> None:
         """增量更新用户画像。
 
-        省略 start_line/end_line → 追加到末尾。
+        省略 start_line/end_line -> 追加到末尾。
         指定时替换 [start_line, end_line) 之间的行。
         """
         # 读取现有正文
@@ -578,7 +605,7 @@ class SubconsciousRunner:
             s = max(0, start_line)
             e = max(s, min(len(body_lines), end_line))
             new_body_lines = body_lines[:s] + new + body_lines[e:]
-            operation = f"replace [{s}:{e}] → [{s}:{s + len(new)}]"
+            operation = f"replace [{s}:{e}] -> [{s}:{s + len(new)}]"
         new_body = "\n".join(new_body_lines)
 
         self._profile_path.parent.mkdir(parents=True, exist_ok=True)

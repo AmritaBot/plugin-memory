@@ -101,7 +101,7 @@ flowchart TB
     Surface -->|"knowledge_suggest"| SuggQueue["知识建议队列"]
     SuggQueue --> AgentLoop
     Surface -.->|"共享 ChromaDB"| Subconscious
-    Runner -->|"持久化状态"| CachedRepo["CachedUserDataRepository"]
+    Runner -->|"持久化状态"| StateTable["SubconsciousState 表<br/>(插件自有 ORM)"]
     Runner -->|"usage 统计"| Insights["InsightsModel<br/>全局 Token 统计"]
 ```
 
@@ -123,7 +123,7 @@ flowchart TB
 | 功能         | 说明                                                      |
 | ------------ | --------------------------------------------------------- |
 | 事件驱动     | 用户发消息触发，无活动则永远空闲                          |
-| 惩罚退避     | 连续触发时指数延长延迟（30min→45min→...→1440min）         |
+| 惩罚退避     | 连续触发时指数延长延迟（30min->45min->...->1440min）         |
 | 自动整理     | LLM 后台去重、合并、标签补全、低质清理                    |
 | 记忆压缩     | Core `MemoryLimiter` 截断超限 + 自动摘要                  |
 | 去重辅助     | `subconscious_duplicate_helper` 返回待整理记忆 + 合并指导 |
@@ -166,7 +166,7 @@ flowchart LR
     end
 
     subgraph Vector["ChromaDB"]
-        Embedding["{kid → embedding(summary)}"]
+        Embedding["{kid -> embedding(summary)}"]
     end
 
     File <-->|"解析/写入"| Index
@@ -240,10 +240,10 @@ flowchart LR
 
 | 存储             | 技术                                                  | 存什么                                                                                |
 | ---------------- | ----------------------------------------------------- | ------------------------------------------------------------------------------------- |
-| Runner 元状态    | `CachedUserDataRepository`（uid=`amrita_memory`）     | `total_runs`、`last_abstracts`（最近 N 轮摘要）、`pending_messages`（待发送消息队列） |
-| 当前摘要         | 同上 `memory_json.abstract`                           | 最新一轮 MemoryLimiter 产出的摘要，注入 Jinja2 模板 `<SUMMARY>`                       |
-| Session 摘要缓存 | `LRUCache[int, str]`（最大 128 条）                   | session DB id → LLM 生成的摘要文本，避免重复调用 MemoryLimiter                        |
+| Runner 元状态    | `SubconsciousState` 表（插件自有 ORM，uid=`amrita_memory`） | `total_runs`、`last_abstracts`（最近 N 轮摘要）、`pending_messages`（待发送消息队列）、`knowledge_suggestions` |
+| Session 摘要缓存 | `LRUCache[int, str]`（最大 128 条）                   | session DB id -> LLM 生成的摘要文本，避免重复调用 MemoryLimiter                        |
 | 惩罚计数器       | 内存（不持久化）                                      | `_penalty_count`：重启后从 0 开始，等价于"新鲜启动"                                   |
+| L1 备忘录        | `UserMemo` 表（插件自有 ORM，主键=uni_id）            | LLM 维护的常驻用户元信息（≤`memo_max_chars`），每轮注入 system prompt                 |
 | 用户画像         | `data/user_profile.md`                                | Markdown 文件，`summary---body` 格式，行级增量更新                                    |
 | 全局知识库       | `data/knowledge/` + `knowledge_index.json` + ChromaDB | 三方同步管理                                                                          |
 | Token 统计       | `InsightsModel`（复用 Bot ORM）                       | 全局 prompt/completion token 累加                                                     |
@@ -276,7 +276,7 @@ flowchart TD
 
 **事件驱动 + 指数惩罚退避**。不使用定时自循环——只有目标用户发消息时才触发推理。
 
-用户每次聊天 → 取消现有计划 → 惩罚计数 +1 → 重新计算延迟：
+用户每次聊天 -> 取消现有计划 -> 惩罚计数 +1 -> 重新计算延迟：
 
 $$\text{delay} = \min(\text{base} \times \text{multiplier}^{\text{penalty}-1},\ \text{cap})$$
 
@@ -291,7 +291,7 @@ flowchart TD
     LOAD_STATE --> JINJA2_RENDER --> LIMITING_MEMORY --> BUILD_MESSAGE --> REACT_BLOCK
 ```
 
-`LIMITING_MEMORY` 在 Agent Loop 之前运行 Core `MemoryLimiter`：消息截断 → 摘要生成。`_build_config()` 将 `enable_memory_compress` 和 `loop_detect_threshold` 注入 `AmritaConfig`。
+`LIMITING_MEMORY` 在 Agent Loop 之前运行 Core `MemoryLimiter`：消息截断 -> 摘要生成。`_build_config()` 将 `enable_memory_compress` 和 `loop_detect_threshold` 注入 `AmritaConfig`。
 
 ## 技术栈
 
@@ -301,7 +301,7 @@ flowchart TD
 | 向量数据库 | ChromaDB（PersistentClient / HttpClient）          |
 | 嵌入模型   | OpenAI Embedding / Ollama Embedding                |
 | 调度引擎   | nonebot_plugin_apscheduler（date trigger）         |
-| 持久化     | CachedUserDataRepository                           |
+| 持久化     | nonebot_plugin_orm（插件自有模型 + 迁移链）        |
 | Token 统计 | InsightsModel（复用 Bot 全局 usage）               |
 | 缓存       | nonebot_plugin_amrita.cache.LRUCache               |
 | 配置管理   | Pydantic + TOML                                    |

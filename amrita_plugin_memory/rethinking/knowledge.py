@@ -87,12 +87,12 @@ class KnowledgeBaseManager:
         vector_ids: set[str] = set(await self._get_all_vector_ids())
         changed = False
 
-        # 1. 文件在，JSON 无 → 解析追加到 JSON + sync_to_vector
+        # 1. 文件在，JSON 无 -> 解析追加到 JSON + sync_to_vector
         for kid in existing_files - index_map.keys():
             await self._recover_orphan_file(kid, index, index_map)
             changed = changed or kid in {e["kid"] for e in index}
 
-        # 2. JSON 在，文件无 → 从 JSON 删除 + remove_from_vector
+        # 2. JSON 在，文件无 -> 从 JSON 删除 + remove_from_vector
         for kid in index_map.keys() - existing_files:
             index = [e for e in index if e["kid"] != kid]
             del index_map[kid]
@@ -101,13 +101,13 @@ class KnowledgeBaseManager:
             changed = True
             logger.info(f"[KB] Orphan index removed: {kid}")
 
-        # 3. JSON+文件都在，向量缺失 → sync_to_vector
+        # 3. JSON+文件都在，向量缺失 -> sync_to_vector
         for kid in (index_map.keys() & existing_files) - vector_ids:
             await self._sync_to_vector(kid, index_map[kid]["summary"])
             changed = True
             logger.debug(f"[KB] Missing vector restored: {kid}")
 
-        # 4. 向量在，JSON 无 → remove_from_vector
+        # 4. 向量在，JSON 无 -> remove_from_vector
         for kid in vector_ids - index_map.keys():
             await self._remove_from_vector(kid)
             changed = True
@@ -118,7 +118,7 @@ class KnowledgeBaseManager:
             self._index = index
             logger.info(
                 f"[KB] validate_on_startup repairs: {len(existing_files)} files, "
-                f"{len(index)} index entries, {len(vector_ids)} vectors → synced"
+                f"{len(index)} index entries, {len(vector_ids)} vectors -> synced"
             )
         else:
             logger.debug(

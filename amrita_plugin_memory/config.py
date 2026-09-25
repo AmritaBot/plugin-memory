@@ -100,6 +100,12 @@ class ConfigFile(BaseModel):
     per_session_memory_limit: int = Field(
         default=100, description="每个会话的记忆数量限制，默认为50条"
     )
+    memo_max_chars: int = Field(
+        default=1000,
+        ge=100,
+        le=10000,
+        description="L1 备忘录单条最大字符数，超出后 update_memo 会被拒绝",
+    )
     subconscious: SubconsciousConfig = Field(
         default_factory=SubconsciousConfig, description="常驻推理循环配置"
     )

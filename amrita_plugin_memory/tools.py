@@ -3,6 +3,7 @@ from datetime import datetime
 from typing import Any, Literal, cast
 
 from amrita.plugins.chat.runtime import AmritaBotContext
+from amrita.plugins.chat.utils.sql import get_uni_user_id
 from amrita_core import (
     FunctionDefinitionSchema,
     FunctionParametersSchema,
@@ -16,6 +17,7 @@ from nonebot.adapters.onebot.v11 import Event as OB11Event
 from nonebot.adapters.onebot.v11 import GroupMessageEvent
 
 from .config import DataManager
+from .memo import MemoTooLongError, set_memo
 from .vector import AsyncUserMemory, MemoryMetadata, get_db_conn
 
 Scope = Literal["group", "user"]  # type alias
@@ -186,6 +188,26 @@ LIST_MEMORY_FUN = FunctionDefinitionSchema(
             "scope": _SCOPE_PROP,
         },
         required=["scope"],
+    ),
+)
+
+UPDATE_MEMO_FUN = FunctionDefinitionSchema(
+    name="update_memo",
+    description=(
+        "整篇替换当前作用域的备忘录——一段常驻注入系统提示的"
+        "简短用户元信息（≤1000字），存放每次对话都需要的恒常事实，"
+        "如身份、稳定偏好、用户要求的工具调用模式。"
+        "调用前先精炼内容：只保留高价值事实，细节应写入 write_memory。"
+        "超长会被拒绝，需压缩后重试"
+    ),
+    parameters=FunctionParametersSchema(
+        type="object",
+        properties={
+            "content": FunctionPropertySchema(
+                type="string", description="备忘录新全文，整篇替换旧内容"
+            ),
+        },
+        required=["content"],
     ),
 )
 
@@ -414,3 +436,23 @@ async def list_memory(ctx: ToolContext) -> str:
             f"列出记忆时发生错误: {e}"
         )
         return _err(f"列出记忆失败: {e!s}")
+
+
+@on_tools(UPDATE_MEMO_FUN, custom_run=True, strict=True)
+async def update_memo(ctx: ToolContext) -> str:
+    if err := _check_required(ctx, "update_memo", "content"):
+        return err
+    event: OB11Event = _get_event(ctx)
+    uni_id = get_uni_user_id(event)
+    content: str = ctx.data["content"]
+    try:
+        await set_memo(uni_id, content)
+    except MemoTooLongError as e:
+        return _err(str(e))
+    except Exception as e:
+        logger.opt(exception=e, colors=True, raw=True).exception(
+            f"更新备忘录时发生错误: {e}"
+        )
+        return _err(f"更新备忘录失败: {e!s}")
+    logger.debug(f"更新备忘录成功: uni_id={uni_id}, len={len(content)}")
+    return _ok(message="备忘录已更新", chars=len(content))

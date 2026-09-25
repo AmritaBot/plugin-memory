@@ -31,7 +31,7 @@ async def _setup_subconscious_hook() -> None:
         if pending and runner._config.allow_send_to_user:
             msgs = list(pending)
             _state.set_pending([])
-            await runner._save_pending_to_repo()
+            await runner._save_state()
             for entry in msgs:
                 content = entry.get("content", "")
                 ts = entry.get("timestamp", "")

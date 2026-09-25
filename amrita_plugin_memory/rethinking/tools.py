@@ -257,7 +257,7 @@ async def subconscious_send_to_user(data: dict[str, Any]) -> str:
     ts = datetime.now(timezone.utc).isoformat()
     pending = _state.get_pending()
     pending.append({"content": content, "timestamp": ts})
-    await runner._save_pending_to_repo()
+    await runner._save_state()
     # 即时发送
     try:
         from nonebot import get_bot
@@ -621,7 +621,7 @@ async def subconscious_knowledge_search(data: dict[str, Any]) -> str:
         return _tools_err(str(e))
 
 
-#  知识建议（对话 LLM → 潜意识 Agent 审查管线）
+#  知识建议（对话 LLM -> 潜意识 Agent 审查管线）
 
 
 @on_tools(KNOWLEDGE_SUGGEST_SCHEMA, strict=True)
@@ -641,7 +641,7 @@ async def knowledge_suggest(data: dict[str, Any]) -> str:
     # 触发持久化
     runner = _state.get_runner()
     if runner is not None:
-        await runner._save_pending_to_repo()
+        await runner._save_state()
     logger.info(
         f"[Subconscious] Knowledge suggestion queued: "
         f"action={action}, title={suggestion['title'][:50]}"
@@ -664,7 +664,7 @@ async def subconscious_read_suggestions(data: dict[str, Any]) -> str:
     # 持久化空队列
     runner = _state.get_runner()
     if runner is not None:
-        await runner._save_pending_to_repo()
+        await runner._save_state()
     logger.info(
         f"[Subconscious] Read {len(suggestions)} knowledge suggestions, queue cleared"
     )

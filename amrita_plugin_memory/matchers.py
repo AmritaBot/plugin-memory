@@ -55,7 +55,7 @@ async def _(
         action = rest.split(maxsplit=1)[0] if rest else ""
         action_args = rest.split(maxsplit=1)[1] if rest and " " in rest else ""
     elif sub in ("list", "search", "delete"):
-        # 老格式兼容 /memory list 等 → 默认以个人范围执行
+        # 老格式兼容 /memory list 等 -> 默认以个人范围执行
         scope = "user"
         action = sub
         action_args = rest
