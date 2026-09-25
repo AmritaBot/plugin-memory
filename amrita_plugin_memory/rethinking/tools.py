@@ -43,8 +43,6 @@ from .schemas import (
 
 _SUBCONSCIOUS_TOOLS = _state.get_tools_manager()
 
-#  辅助
-
 
 def _make_operator() -> AsyncUserMemory:
     return AsyncUserMemory(get_db_conn())
@@ -65,9 +63,6 @@ def _tools_err(message: str) -> str:
 
 def _tools_ok(**extra: Any) -> str:
     return json.dumps({"status": "success", **extra}, ensure_ascii=False, indent=2)
-
-
-#  Handler
 
 
 @on_tools(READ_MEMORY_SCHEMA, strict=True, bound_to=_SUBCONSCIOUS_TOOLS)
@@ -259,7 +254,6 @@ async def subconscious_send_to_user(data: dict[str, Any]) -> str:
     pending = _state.get_pending()
     pending.append({"content": content, "timestamp": ts})
     await runner._save_state()
-    # 即时发送
     try:
         from nonebot import get_bot
 
@@ -306,9 +300,6 @@ async def subconscious_read_chat_context(data: dict[str, Any]) -> str:
         return _tools_err(str(e))
 
 
-#  消息生成
-
-
 async def _generate_send_content(intent: str, memory_context: str) -> str:
     runner = _state.get_runner()
     if runner is None:
@@ -337,9 +328,6 @@ async def _generate_send_content(intent: str, memory_context: str) -> str:
     return response.content.strip()
 
 
-#  压缩辅助工具
-
-
 @on_tools(DUPLICATE_HELPER_SCHEMA, strict=True, bound_to=_SUBCONSCIOUS_TOOLS)
 async def subconscious_duplicate_helper(data: dict[str, Any]) -> str:
     """返回指定范围内全部记忆 + LLM 合并指导 prompt。
@@ -364,7 +352,6 @@ async def subconscious_duplicate_helper(data: dict[str, Any]) -> str:
             {} for _ in ids
         ]
 
-        # 过滤
         tag_filter = data.get("tag")
         imp_filter = data.get("importance")
         sort_by = str(data.get("sort_by", "created_at"))
@@ -387,7 +374,6 @@ async def subconscious_duplicate_helper(data: dict[str, Any]) -> str:
                 }
             )
 
-        # 排序
         if sort_by == "importance":
             importance_order = {"high": 0, "medium": 1, "low": 2}
             items.sort(key=lambda x: importance_order.get(str(x["importance"]), 1))
@@ -480,9 +466,6 @@ async def subconscious_get_memory_stats(data: dict[str, Any]) -> str:
             f"subconscious_get_memory_stats error: {e}"
         )
         return _tools_err(str(e))
-
-
-#  全局知识库工具
 
 
 def _get_kb_manager():
@@ -622,7 +605,7 @@ async def subconscious_knowledge_search(data: dict[str, Any]) -> str:
         return _tools_err(str(e))
 
 
-#  知识建议（对话 LLM -> 潜意识 Agent 审查管线）
+# 知识建议：对话 LLM -> 潜意识 Agent 审查管线
 
 
 @on_tools(KNOWLEDGE_SUGGEST_SCHEMA, strict=True)
@@ -674,9 +657,6 @@ async def subconscious_read_suggestions(data: dict[str, Any]) -> str:
         ensure_ascii=False,
         indent=2,
     )
-
-
-#  Session 与用户画像工具
 
 
 def _get_runner():

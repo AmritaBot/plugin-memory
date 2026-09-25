@@ -184,11 +184,9 @@ async def _handle_delete(
         result = await ope.get_all_notes(partition_id, include=["metadatas"])
         all_ids: list[str] = result.get("ids") or []
 
-        # 精确匹配
         if doc_id in all_ids:
             resolved_id = doc_id
         else:
-            # 前缀匹配
             matches = [mid for mid in all_ids if mid.startswith(doc_id)]
             if len(matches) == 0:
                 await matcher.finish(

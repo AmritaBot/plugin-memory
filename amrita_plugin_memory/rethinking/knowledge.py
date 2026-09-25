@@ -54,8 +54,6 @@ class KnowledgeBaseManager:
         self._collection: Collection | None = None
         self._index: list[KnowledgeEntry] = []
 
-    #   生命周期
-
     async def init(self) -> None:
         """创建目录，获取 ChromaDB collection。"""
         self._knowledge_dir.mkdir(parents=True, exist_ok=True)
@@ -76,7 +74,6 @@ class KnowledgeBaseManager:
         index = self._load_index()
         index_map: dict[str, KnowledgeEntry] = {e["kid"]: e for e in index}
 
-        # 扫描 knowledge/ 目录
         existing_files: set[str] = set()
         if self._knowledge_dir.exists():
             for f in self._knowledge_dir.iterdir():
@@ -124,8 +121,6 @@ class KnowledgeBaseManager:
             logger.debug(
                 f"[KB] validate_on_startup: all {len(index)} entries consistent"
             )
-
-    #   公开 API
 
     async def list_all(self) -> list[KnowledgeListItem]:
         """返回索引中全部知识条目（不含正文）。"""
@@ -304,7 +299,6 @@ class KnowledgeBaseManager:
             list[dict[str, object]], (raw_result.get("metadatas") or [[]])[0]
         )
 
-        # 从索引获取完整信息
         index_map = {e["kid"]: e for e in self._index}
         items: list[KnowledgeSearchItem] = []
         for i, kid in enumerate(ids):
@@ -321,8 +315,6 @@ class KnowledgeBaseManager:
                 }
             )
         return items
-
-    #   内部方法
 
     async def _recover_orphan_file(
         self,

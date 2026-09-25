@@ -1,4 +1,3 @@
-# Configuration for your_plugin_name plugin
 from typing import Literal
 
 from amrita_core import ModelPreset
@@ -14,11 +13,15 @@ PLUGIN_IM = "amrita_plugin_memory"
 
 
 class SubconsciousConfig(BaseModel):
-    """常驻推理循环（潜意识层）配置 — 实验性功能"""
+    """常驻推理循环（潜意识层）配置。
+
+    默认只实现单用户：多用户场景与用户体量难以预测，需要多用户支持时请自行实现。
+    """
 
     enabled: bool = Field(default=False, description="是否启用常驻推理循环")
     target_user_id: str = Field(
-        default="", description="目标用户ID（MVP仅支持单用户），为空则不启动"
+        default="",
+        description=("目标用户ID（默认仅实现单用户，多用户需自行实现），为空则不启动"),
     )
     allowed_tools: list[str] = Field(
         default_factory=list,

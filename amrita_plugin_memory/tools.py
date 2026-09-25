@@ -62,7 +62,6 @@ def _check_required(ctx: ToolContext, tool_name: str, *params: str) -> str | Non
     return None
 
 
-#  公共参数：scope
 _SCOPE_PROP = FunctionPropertySchema(
     type="string",
     description=(
@@ -72,7 +71,6 @@ _SCOPE_PROP = FunctionPropertySchema(
     enum=["group", "user"],
 )
 
-#  Function Schema 定义
 
 WRITE_MEMORY_FUN = FunctionDefinitionSchema(
     name="write_memory",
@@ -197,9 +195,6 @@ UPDATE_MEMO_FUN = FunctionDefinitionSchema(
         required=["content"],
     ),
 )
-
-
-#  Handler 实现
 
 
 @on_tools(WRITE_MEMORY_FUN, custom_run=True, strict=True)
