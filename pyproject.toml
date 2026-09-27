@@ -1,7 +1,7 @@
 [project]
 name = "amrita_plugin_memory"
 description = "Amrita长期记忆插件"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
     "aiohttp>=3.13.3",
     "aiologic>=0.16.0",
@@ -18,9 +18,6 @@ readme = "README.md"
 requires-python = ">=3.10, <3.14"
 
 [project.entry-points."ambot.commands"]
-# [full_load] 是 ambot-inlinectl 认识的 extra：命令真正被调用时，
-# 它会先 amrita.init() + amrita.load_plugins() 再加载本命令。
-# 因为 amrita_plugin_memory 包在插件加载器之外无法 import。
 memory = "amrita_plugin_memory.cli:memory [full_load]"
 
 [tool.nonebot]
