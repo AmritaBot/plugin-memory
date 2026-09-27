@@ -34,6 +34,9 @@ _ANY_ID_RE = re.compile(
     r"^(?:[A-Za-z0-9]+_)?(?P<kind>Private|Group|Channel|user|group)_(?P<payload>[0-9]+)$"
 )
 
+# 更早期的数据只有纯数字 ID，既无平台前缀也无类型前缀，单看键本身无法判断是用户还是群 —— 需借助 metadata 里的 scope。
+_BARE_ID_RE = re.compile(r"^(?P<payload>[0-9]+)$")
+
 
 def make_scope_id(payload: int | str, *, is_group: bool) -> str:
     """生成分区键 — 委托框架，自动跟随已安装 Amrita 的格式。"""
@@ -59,13 +62,18 @@ def resolve_scope_uni_id(event: OB11Event, scope: str) -> str:
     raise ValueError(f"无效的 scope: {scope}")
 
 
-def to_current_format(raw: str) -> str | None:
+def to_current_format(raw: str, *, scope: str | None = None) -> str | None:
     """把任意历史格式的分区键规范化到当前框架格式。
 
     已是当前格式时返回原值（幂等）；无法识别或本插件未使用的类型返回 None。
+    ``scope``（``"user"`` / ``"group"``）用于补全只有纯数字的历史键 ——
+    这类键本身不含类型信息，缺了 scope 就只能放弃迁移。
     """
     match = _ANY_ID_RE.match(raw)
     if match is None:
+        bare = _BARE_ID_RE.match(raw)
+        if bare is not None and scope in ("user", "group"):
+            return make_scope_id(bare.group("payload"), is_group=scope == "group")
         return None
     kind = match.group("kind")
     payload = match.group("payload")
@@ -101,14 +109,22 @@ def migrate_collection_keys(collection: Collection, *, dry_run: bool = False) ->
 
     target_ids: list[str] = []
     target_metas: list[Metadata] = []
+    skipped = 0
     for doc_id, raw_meta in zip(ids, metadatas):
         if not raw_meta:
             continue
         current = raw_meta.get("user_id")
         if not isinstance(current, str):
             continue
-        converted = to_current_format(current)
-        if converted is None or converted == current:
+        scope = raw_meta.get("scope")
+        converted = to_current_format(
+            current, scope=scope if isinstance(scope, str) else None
+        )
+        if converted is None:
+            skipped += 1
+            logger.warning(f"[Memory] 无法识别的分区键，已跳过：{current!r}")
+            continue
+        if converted == current:
             continue
         target_ids.append(doc_id)
         target_metas.append({**raw_meta, "user_id": converted})
@@ -119,5 +135,7 @@ def migrate_collection_keys(collection: Collection, *, dry_run: bool = False) ->
     if target_ids:
         collection.update(ids=target_ids, metadatas=target_metas)
         logger.info(f"[Memory] Key migrated for {len(target_ids)} memories")
+    if skipped:
+        logger.warning(f"[Memory] {skipped} 条记忆的分区键无法识别，未迁移")
     collection.modify(metadata={**meta, KEY_SCHEMA_VERSION_META: KEY_SCHEMA_VERSION})
     return len(target_ids)

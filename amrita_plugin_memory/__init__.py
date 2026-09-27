@@ -1,4 +1,4 @@
-from nonebot import require
+from nonebot import get_driver, require
 
 require("nonebot_plugin_localstore")
 require("nonebot_plugin_apscheduler")
@@ -19,8 +19,15 @@ from . import (
     vector,
 )
 
-# 启动检查（import 期，同步）：Key 迁移 + 嵌入模型指纹校验。内部已做防御性处理：只有“需要确认但环境不可交互”会抛出异常，从而拒绝加载插件（刻意的失败快）；其余异常只告警。
+# import 期只做 Key 迁移与指纹比对（不重嵌入）：call_embedding 依赖的全局 AmritaConfig 此时尚未设置。
 embedding.run_startup_check()
+
+
+@get_driver().on_startup
+async def _memory_deferred_fingerprint_check() -> None:
+    """startup 期处理 import 期发现的指纹失配（此时 AmritaConfig 已就绪）。"""
+    await embedding.run_deferred_check()
+
 
 __all__ = [
     "config",

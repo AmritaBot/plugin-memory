@@ -38,13 +38,8 @@ EMBED_BASE_URL_META = "embed_base_url"
 
 BACKUP_DIR = DATA_PATH / "backups"
 
-
-class _RefuseToLoad(RuntimeError):
-    """内部信号 — 需要拒绝加载插件。不对外抛出。
-
-    对外统一转成内建 ``RuntimeError``：插件加载失败时父包处于半导入状态，
-    loguru 无法 pickle 本模块定义的异常类，会产生噪声堆栈。
-    """
+REBUILD_SUFFIX = "__rebuild"
+"""重映射期间使用的临时集合名后缀。"""
 
 
 def compute_fingerprint() -> str:
@@ -162,13 +157,61 @@ async def _write_in_batches(
     return done
 
 
+def _collection_names(client: ClientAPI) -> set[str]:
+    return {c.name for c in client.list_collections()}
+
+
+def _drop_if_exists(client: ClientAPI, name: str) -> None:
+    if name in _collection_names(client):
+        client.delete_collection(name)
+
+
+async def _replace_collection(
+    client: ClientAPI,
+    ids: list[str],
+    documents: list[str],
+    metadatas: list[Metadata],
+    *,
+    batch_size: int,
+    progress: Callable[[int, int], None] | None = None,
+) -> int:
+    """把内容重新嵌入到临时集合，全部成功后才替换正式集合。
+
+    失败时正式集合原封不动 —— “先删后嵌”曾导致嵌入失败即丢数据。
+    """
+    tmp_name = f"{MEMORY_COLLECTION_NAME}{REBUILD_SUFFIX}"
+    _drop_if_exists(client, tmp_name)
+    tmp = client.create_collection(tmp_name)
+    try:
+        done = await _write_in_batches(
+            tmp,
+            ids,
+            documents,
+            metadatas,
+            batch_size=batch_size,
+            progress=progress,
+        )
+        write_fingerprint(tmp)
+    except BaseException:
+        # 保留正式集合；清掉半成品，下次可重试
+        _drop_if_exists(client, tmp_name)
+        raise
+    # 数据已完整落在 tmp 中，此刻替换才是安全的
+    _drop_if_exists(client, MEMORY_COLLECTION_NAME)
+    tmp.modify(name=MEMORY_COLLECTION_NAME)
+    return done
+
+
 async def reindex_all(
     *,
     batch_size: int | None = None,
     progress: Callable[[int, int], None] | None = None,
     client: ClientAPI | None = None,
 ) -> int:
-    """用当前嵌入模型重新嵌入全部记忆（删集合 → 重建 → 分批重嵌入）。
+    """用当前嵌入模型重新嵌入全部记忆。
+
+    采用「先重建、后替换」：新向量全部写入临时集合后才替换正式集合，
+    因此嵌入服务不可用等失败不会丢数据（“先删后嵌”曾导致这一点）。
 
     Returns:
         重新嵌入的记忆条数。
@@ -179,31 +222,22 @@ async def reindex_all(
     ids: list[str] = list(result.get("ids") or [])
     documents: list[str] = list(result.get("documents") or [])
     metadatas: list[Metadata] = list(result.get("metadatas") or [])
-    total = len(ids)
 
-    # 先备份：这是删除集合后唯一的回滚依据
-    if total:
-        backup_collection(collection)
-
-    # 空集合：只需重建并写指纹，无需调用嵌入模型
-    if total == 0:
-        client.delete_collection(MEMORY_COLLECTION_NAME)
-        fresh = client.create_collection(MEMORY_COLLECTION_NAME)
-        write_fingerprint(fresh)
+    # 空集合：无需调用嵌入模型，写个指纹即可
+    if not ids:
+        write_fingerprint(collection)
         logger.info("[Memory] Collection was empty, fingerprint written")
         return 0
 
-    client.delete_collection(MEMORY_COLLECTION_NAME)
-    fresh = client.create_collection(MEMORY_COLLECTION_NAME)
-    done = await _write_in_batches(
-        fresh,
+    backup_collection(collection)
+    done = await _replace_collection(
+        client,
         ids,
         documents,
         metadatas,
         batch_size=batch_size or env_config.reembed_batch_size,
         progress=progress,
     )
-    write_fingerprint(fresh)
     logger.info(f"[Memory] Reindexed {done} memories with {describe_current()}")
     return done
 
@@ -217,6 +251,8 @@ async def restore_from_backup(
 ) -> int:
     """从备份文件恢复集合（用当前嵌入模型重新嵌入）。
 
+    同样先重建后替换，失败不会破坏当前数据。
+
     Returns:
         恢复的记忆条数。
     """
@@ -227,65 +263,42 @@ async def restore_from_backup(
     metadatas: list[Metadata] = list(payload.get("metadatas") or [])
 
     client = client or get_db_conn()
-    existing = {c.name for c in client.list_collections()}
-    if MEMORY_COLLECTION_NAME in existing:
+    if MEMORY_COLLECTION_NAME in _collection_names(client):
         # 恢复前先备份当前状态，避免误操作不可逆
         backup_collection(client.get_collection(MEMORY_COLLECTION_NAME))
-        client.delete_collection(MEMORY_COLLECTION_NAME)
-    fresh = client.create_collection(MEMORY_COLLECTION_NAME)
 
-    done = await _write_in_batches(
-        fresh,
+    done = await _replace_collection(
+        client,
         ids,
         documents,
         metadatas,
         batch_size=batch_size or env_config.reembed_batch_size,
         progress=progress,
     )
-    write_fingerprint(fresh)
     logger.info(f"[Memory] Restored {done} memories from {path.name}")
     return done
 
 
-def _run_async(coro: Any) -> Any:
-    """在同步上下文（import 期）执行协程；已有事件循环时给出明确指引。"""
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        return asyncio.run(coro)
-    raise _RefuseToLoad(
-        "检测到嵌入模型变更，但当前处于运行中的事件循环内，无法执行重映射。"
-        "请在终端运行 `ambot memory reindex`。"
-    )
-
-
-def _confirm_reindex(reason: str, stored_desc: str) -> bool:
-    """交互确认；非 TTY 时抛出 _RefuseToLoad。"""
+def _confirm_reindex(reason: str) -> bool:
+    """交互确认；非 TTY 时返回 False（数据保持原样，提示手动执行）。"""
     if not sys.stdin.isatty():
-        raise _RefuseToLoad(
-            f"{reason}\n"
-            "当前为非交互环境，无法确认。请在终端运行 `ambot memory reindex` "
+        logger.warning(
+            f"[Memory] {reason}\n"
+            "  当前为非交互环境，无法确认。请在终端运行 `ambot memory reindex`，"
             "或设置 EMBED_MISMATCH_POLICY=auto / never，"
             "或设置 EMBED_CHECK_ON_STARTUP=false 跳过检查。"
         )
+        return False
     return click.confirm(
         f"{reason}\n"
-        f"  库中记录: {stored_desc}\n"
         f"  当前配置: {describe_current()}\n"
         "是否用当前模型重新嵌入全部记忆？（旧向量将与新模型不兼容）",
         default=True,
     )
 
 
-def _do_reindex_with_progress() -> int:
-    def _progress(done: int, total: int) -> None:
-        click.echo(f"  重映射进度: {done}/{total}", err=True)
-
-    return _run_async(reindex_all(progress=_progress))
-
-
-def _check_fingerprint(collection: Collection) -> None:
-    """指纹校验主逻辑（可能抛出 _RefuseToLoad）。"""
+def _inspect_fingerprint(collection: Collection) -> str | None:
+    """比对指纹，返回失配原因；``None`` 表示无需处理。"""
     current = compute_fingerprint()
     stored = stored_fingerprint(collection)
 
@@ -293,49 +306,36 @@ def _check_fingerprint(collection: Collection) -> None:
     if collection.count() == 0:
         write_fingerprint(collection)
         logger.debug("[Memory] Empty collection, fingerprint written")
-        return
+        return None
 
     if stored == current:
         logger.debug("[Memory] Embedding fingerprint matches")
-        return
+        return None
 
     if stored is None:
-        reason = "库中未记录嵌入模型信息，无法确认现有向量与当前配置是否一致。"
-    else:
-        reason = "嵌入模型已变更，现有向量与当前模型不兼容。"
+        return "库中未记录嵌入模型信息，无法确认现有向量与当前配置是否一致。"
+    return "嵌入模型已变更，现有向量与当前模型不兼容。"
 
-    policy = env_config.embed_mismatch_policy
-    if policy == "never":
-        logger.warning(f"[Memory] {reason} 策略为 never，保持现有数据不变。")
-        return
-    if policy == "auto":
-        logger.warning(f"[Memory] {reason} 策略为 auto，开始全量重映射。")
-        _do_reindex_with_progress()
-        return
 
-    stored_desc = describe_stored(collection) if stored else "（无记录）"
-    if not _confirm_reindex(reason, stored_desc):
-        logger.warning("[Memory] 用户拒绝重映射，保持现有数据不变。")
-        return
-    _do_reindex_with_progress()
+_pending_mismatch: str | None = None
+"""import 期检测到、待 startup 期处理的指纹失配原因。"""
 
 
 def run_startup_check() -> None:
-    """启动检查：Key 迁移 + 嵌入指纹校验。在插件 import 期调用（同步）。
+    """import 期检查：Key 迁移 + 指纹比对（**不重嵌入**）。
 
-    Key 迁移与嵌入无关，始终执行（幂等且廉价）。指纹检查受
+    Key 迁移与嵌入无关，始终执行（幂等且廉价）。指纹比对受
     ``EMBED_CHECK_ON_STARTUP`` 控制。
 
-    仅当需要用户确认而环境不可交互时拒绝加载插件；其余异常
-    （向量库不可达、嵌入服务故障等）只告警，不影响插件可用性。
+    这里刻意不做重映射：``call_embedding`` 依赖全局 ``AmritaConfig``，而它要到
+    bot 启动流程才被设置 —— import 期调用必然抛
+    ``Global AmritaConfig is not initialized``。重映射因此推迟到
+    :func:`run_deferred_check`（startup 期）。
 
     处于 ``ambot <cmd>`` 命令上下文（``AMBOT_COMMAND_CONTEXT``）时整体跳过：
-    维护命令本就是为了修复状态，启动检查反过来会挡住它们（交互确认，
-    甚至直接拒绝加载）。
-
-    Raises:
-        RuntimeError: 模型变更且无法确认时（插件将不被加载）。
+    维护命令本就是为了修复状态，启动检查反过来会挡住它们。
     """
+    global _pending_mismatch
     if os.environ.get("AMBOT_COMMAND_CONTEXT"):
         logger.debug("[Memory] 命令上下文，跳过启动检查")
         return
@@ -357,9 +357,46 @@ def run_startup_check() -> None:
         return
 
     try:
-        _check_fingerprint(collection)
-    except _RefuseToLoad as e:
-        logger.error(f"[Memory] 拒绝加载插件：{e}")
-        raise RuntimeError(str(e)) from None
+        _pending_mismatch = _inspect_fingerprint(collection)
     except Exception as e:
         logger.warning(f"[Memory] 嵌入指纹检查跳过：{e}")
+        return
+
+    if _pending_mismatch:
+        logger.warning(
+            f"[Memory] {_pending_mismatch} 将在启动完成后处理"
+            f"（策略：{env_config.embed_mismatch_policy}）。"
+        )
+
+
+async def run_deferred_check() -> None:
+    """startup 期执行重映射 —— 此时 ``AmritaConfig`` 已就绪。
+
+    策略语义（``EMBED_MISMATCH_POLICY``）：
+
+    - ``never``：只告警，保持现有数据
+    - ``ask``：TTY 下交互确认；非 TTY 则告警并保持数据（不再拒绝加载）
+    - ``auto``：自动全量重映射
+
+    重映射失败只会记录错误，数据保持原样（``reindex_all`` 先重建后替换）。
+    """
+    global _pending_mismatch
+    if not _pending_mismatch:
+        return
+    reason, _pending_mismatch = _pending_mismatch, None
+
+    policy = env_config.embed_mismatch_policy
+    if policy == "never":
+        logger.warning(f"[Memory] {reason} 策略为 never，保持现有数据不变。")
+        return
+    if policy == "ask" and not await asyncio.to_thread(_confirm_reindex, reason):
+        logger.warning("[Memory] 未执行重映射，保持现有数据不变。")
+        return
+
+    logger.warning(f"[Memory] {reason} 开始全量重映射……")
+    try:
+        done = await reindex_all()
+    except Exception as e:
+        logger.error(f"[Memory] 重映射失败，现有数据未被修改：{e}")
+        return
+    logger.info(f"[Memory] 重映射完成，共 {done} 条。")
