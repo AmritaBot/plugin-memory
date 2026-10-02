@@ -146,7 +146,7 @@ L3 在代码中沿用历史标识符 `subconscious` / `rethinking`（避免破�
 | `subconscious_*` 工具             | 巩固循环工具   | —                                                |
 | 用户聊天 → `cancel_and_reschedule` | 任务负激活     | 专注任务时 DMN 被抑制                            |
 | 静默期触发 `_run`                 | 空闲时活跃     | DMN 在无任务时活跃                               |
-| 去重 / 压缩 / `MemoryLimiter`      | 记忆巩固       | 海马 → 皮层的系统巩固                            |
+| 去重 / 压缩 / `ContextCompactor`   | 记忆巩固       | 海马 → 皮层的系统巩固                            |
 | 画像构建（`*_profile`）            | 自传体记忆     | DMN 负责自我参照加工                             |
 | 主动消息（`send_to_user`）         | 心智游移       | 走神产生与自我相关的念头                         |
 | 每轮数万 tokens                    | 静息高能耗     | DMN 占脑能耗约 20%                               |
@@ -268,7 +268,7 @@ $$\text{delay} = \min(\text{base} \times \text{multiplier}^{\text{penalty}-1},\ 
 | 阶段           | 内容                                                       |
 | -------------- | ---------------------------------------------------------- |
 | 状态加载       | 从 `SubconsciousState` 表恢复 `total_runs` / 摘要窗口      |
-| 记忆限幅       | Core `MemoryLimiter` 截断超限消息并生成摘要                |
+| 记忆限幅       | Core `ContextCompactor` 截断超限消息并生成摘要             |
 | ReAct 循环     | Agent 调用 `subconscious_*` 工具执行整理                   |
 | 后处理         | 更新全局 usage、持久化元状态、重置惩罚、调度下次运行       |
 
@@ -285,12 +285,13 @@ $$\text{delay} = \min(\text{base} \times \text{multiplier}^{\text{penalty}-1},\ 
 
 ```mermaid
 flowchart TD
-    LOAD_STATE --> JINJA2_RENDER --> LIMITING_MEMORY --> BUILD_MESSAGE --> REACT_BLOCK
+    LOAD_STATE --> NORMALIZE_MESSAGES --> COMPACT_HISTORY --> JINJA2_RENDER --> BUILD_MESSAGE --> REACT_BLOCK
 ```
 
 `SubconsciousRunner` 把 ChatObject 当数据容器，注入自定义 `SubconsciousBackend`
 （隔离的工具 + memory 后端）与 Core `ReActAgentStrategy`。
-`LIMITING_MEMORY` 在 Agent Loop 前运行 Core `MemoryLimiter`。
+工作流直接复用 Core 内置的 `REACT_ONLY`，其中的 `COMPACT_HISTORY` 节点在 Agent
+Loop 前运行 Core `ContextCompactor`。压缩排在渲染之前，摘要才能进入本次请求的系统提示词。
 
 ---
 
@@ -454,7 +455,7 @@ flowchart TD
 | ---------------- | ------------------------------------------------------------ | -------------------------------------------------------------------------------------------------- |
 | L1 备忘录        | `UserMemo` 表（插件自有 ORM，主键 = uni_id）                 | LLM 维护的常驻用户元信息（≤ `memo_max_chars`）                                                     |
 | 循环元状态       | `SubconsciousState` 表（插件自有 ORM，uid=`amrita_memory`）  | `total_runs`、`last_abstracts`、`pending_messages`、`knowledge_suggestions`                        |
-| Session 摘要缓存 | `LRUCache[int, str]`（最大 128 条）                          | session DB id → LLM 生成的摘要文本，避免重复调用 MemoryLimiter                                     |
+| Session 摘要缓存 | `LRUCache[int, str]`（最大 128 条）                          | session DB id → LLM 生成的摘要文本，避免重复调用 `ContextCompactor`                                     |
 | 惩罚计数器       | 内存（不持久化）                                             | `_penalty_count`：重启后从 0 开始                                                                  |
 | L2 记忆          | ChromaDB `amrita_user_memory`                                | 向量 + documents + metadatas（含嵌入指纹与分区键版本）                                             |
 | 用户画像         | `data/amrita_plugin_memory/user_profile.md`                  | Markdown 文件，`summary---body` 格式，行级增量更新                                                 |
@@ -630,7 +631,6 @@ amrita_plugin_memory/
     ├── types.py               # TypedDict 定义
     ├── consts.py              # 默认 Prompt 模板 / ensure_prompt_file
     ├── backend.py             # SubconsciousBackend — 隔离的工具 + memory 后端
-    ├── nodes.py               # LIMITING_MEMORY 工作流节点
     ├── runner.py              # SubconsciousRunner — 核心编排器
     ├── hooks.py               # on_precompletion hook / 生命周期管理
     ├── tools.py               # 20 个巩固循环工具 handler

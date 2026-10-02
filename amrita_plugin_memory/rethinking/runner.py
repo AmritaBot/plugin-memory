@@ -12,13 +12,12 @@ from amrita.plugins.chat.utils.libchat import add_usage
 from amrita_core import SuspendObjectStream
 from amrita_core.base.backend import BackendSlots
 from amrita_core.builtins.agent import ReActAgentStrategy
-from amrita_core.builtins.workflows import REACT_BLOCK
+from amrita_core.builtins.workflows import REACT_ONLY
 from amrita_core.chatmanager import ChatObject
-from amrita_core.components.llm import JINJA2_RENDER
-from amrita_core.components.process import BUILD_MESSAGE, LOAD_STATE
+from amrita_core.components.compaction import ContextCompactor
 from amrita_core.config import AmritaConfig, get_config
 from amrita_core.preset import ModelPreset
-from amrita_core.types import Message, UniResponseUsage
+from amrita_core.types import CONTENT_LIST_TYPE, Message, UniResponseUsage
 from amrita_core.utils import gather_usage
 from jinja2 import Template
 from nonebot import logger
@@ -44,7 +43,6 @@ from .consts import (
     load_character_prompt,
 )
 from .knowledge import KnowledgeBaseManager
-from .nodes import LIMITING_MEMORY
 from .types import ProfileResult, SessionSummary
 
 _STATE_UID = "amrita_memory"
@@ -52,10 +50,8 @@ _LEGACY_REPO_UID = (
     "amrita_memory"  # 旧版本元状态占用的 Bot Memory 表 uid（仅用于升级迁移）
 )
 
-# 工作流 = 加载状态 -> Jinja2 渲染 -> 记忆限幅 -> 构建消息 -> ReAct 循环
-_WORKFLOW = (
-    LOAD_STATE >> JINJA2_RENDER >> LIMITING_MEMORY >> BUILD_MESSAGE >> REACT_BLOCK
-).render()
+# 工作流 = Core 内置 REACT_ONLY（已包含上下文压缩节点），不再自建
+_WORKFLOW = REACT_ONLY.render()
 
 
 async def _ign_cb(*_, **__): ...
@@ -65,8 +61,8 @@ class SubconsciousRunner:
     """常驻推理循环运行器。
 
     使用 ChatObject 作为数据容器 + 标准 Agent 框架（ReActAgentStrategy）。
-    LIMITING_MEMORY 节点在 Agent Loop 之前运行 MemoryLimiter 压缩会话消息。
-    元状态持久化使用独立的 SubconsciousState 表。
+    工作流直接复用 Core 的 REACT_ONLY，其中的 COMPACT_HISTORY 节点在 Agent
+    Loop 之前压缩会话消息。元状态持久化使用独立的 SubconsciousState 表。
     """
 
     def __init__(self, config: SubconsciousConfig) -> None:
@@ -91,7 +87,7 @@ class SubconsciousRunner:
         """构建自定义 AmritaConfig —— 从全局拷贝并覆写本插件关心的字段。"""
         cfg = get_config().model_copy(deep=True)
         cfg.builtin.loop_reasoning_trigger = self._config.loop_detect_threshold
-        cfg.llm.enable_memory_abstract = self._config.enable_memory_compress
+        cfg.llm.enable_compaction = self._config.enable_memory_compress
         return cfg
 
     async def start(self) -> None:
@@ -195,7 +191,7 @@ class SubconsciousRunner:
         finally:
             self._chat_obj = None
 
-        # MemoryLimiter 在 workflow 中已经产出 chat_obj._di_memory.memory.abstract
+        # 压缩节点已在 workflow 中把摘要写入 chat_obj._di_memory.memory.abstract
         await self._post_process(chat_obj)
 
     @staticmethod
@@ -210,7 +206,7 @@ class SubconsciousRunner:
         # 1. 更新全局 usage（复用 Bot 的 InsightsModel 统计）
         await self._update_global_usage(chat_obj)
 
-        # 2. 提取 MemoryLimiter 产出的摘要
+        # 2. 提取压缩节点产出的摘要
         mem = chat_obj._di_memory.memory
         if mem is not None and mem.abstract:
             self._last_abstracts.append(mem.abstract)
@@ -246,7 +242,7 @@ class SubconsciousRunner:
         """更新全局 InsightsModel usage，复用 Bot 的 add_usage 逻辑。
 
         chat_obj._di_resp.response 是 LLM 最终返回的 UniResponse，
-        chat_obj._di_resp.extra_usage 是 MemoryLimiter 等组件累积的额外 token。
+        chat_obj._di_resp.extra_usage 是压缩等组件累积的额外 token。
         """
         try:
             resp_state = chat_obj._di_resp
@@ -480,10 +476,7 @@ class SubconsciousRunner:
             return []
 
     async def _summarize_session(self, session: MemorySessionsSchema) -> str:
-        """用 MemoryLimiter 生成单个 session 的全会话摘要。"""
-        from amrita_core.chatmanager.memory_limiter import MemoryLimiter
-        from amrita_core.types import MemoryModel
-
+        """用 Core 的 ContextCompactor 生成单个 session 的全会话摘要。"""
         data = session.data
         if data is None:
             return "空会话"
@@ -498,24 +491,13 @@ class SubconsciousRunner:
         except (ValueError, OSError):
             date_str = str(created_at)
 
-        memory = MemoryModel(messages=[], abstract="")
-        for m in raw_messages:
-            if isinstance(m, dict):
-                memory.messages.append(Message.model_validate(m))
-
-        async with MemoryLimiter(
-            memory,
-            Message(role="system", content=""),
-        ) as lim:
-            # 把所有消息放入 dropped_part -> 触发全量摘要
-            lim._dropped_messages = list(memory.messages)
-            memory.messages = []
-            await lim._make_abstract()
-            return (
-                f"[{date_str}] {memory.abstract}"
-                if memory.abstract
-                else f"[{date_str}] 无法生成摘要"
-            )
+        messages: CONTENT_LIST_TYPE = [
+            Message.model_validate(m) for m in raw_messages if isinstance(m, dict)
+        ]
+        if not messages:
+            return "空会话"
+        abstract = await ContextCompactor(config=get_config()).summarize(messages)
+        return f"[{date_str}] {abstract}" if abstract else f"[{date_str}] 无法生成摘要"
 
     async def _read_profile(
         self, start_line: int | None = None, end_line: int | None = None
