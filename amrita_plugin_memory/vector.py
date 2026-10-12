@@ -33,7 +33,8 @@ from nonebot import get_driver, logger
 from pydantic import BaseModel, Field
 from pytz import utc
 
-from .config import VECTOR_DB_PATH, build_preset, env_config
+from .config import VECTOR_DB_PATH, DataManager, DecayConfig, build_preset, env_config
+from .decay import plan_action, rerank_query_result
 
 T = TypeVar("T")
 
@@ -404,23 +405,55 @@ class AsyncUserMemory:
         importance: Literal["low", "medium", "high"] | None = None,
         top_k: int = 5,
         include: chromadb.Include = ["metadatas", "documents", "distances"],
+        decay: DecayConfig | None = None,
     ) -> chromadb.QueryResult:
+        policy = decay or (await DataManager().safe_get_config()).decay
+        where = {
+            "user_id": user_id,
+            **({"importance": importance} if importance else {}),
+        }
         async with get_lock(self._collection_name, user_id):
             query_vector = await call_embedding([query_text], build_preset())
             assert len(query_vector) == 1, "Invalid embedding vector length"
-            return await any_to_thread(
+            # 软衰减要靠距离和元数据重排，缺了就补上
+            fetch_include: list[str] = list(include)
+            if policy.enabled:
+                for key in ("metadatas", "distances"):
+                    if key not in fetch_include:
+                        fetch_include.append(key)
+            fetch_k = max(top_k, 1)
+            if policy.enabled and policy.overfetch > 1:
+                total = len(
+                    (
+                        await any_to_thread(
+                            self._collection.get, where=where, include=[]
+                        )
+                    )["ids"]
+                )
+                if total:
+                    fetch_k = min(top_k * policy.overfetch, total)
+            result = await any_to_thread(
                 self._collection.query,
                 query_vector[0].embedding,
-                [
-                    query_text,
-                ],
-                include=include,
-                n_results=top_k,
-                where={
-                    "user_id": user_id,
-                    **({"importance": importance} if importance else {}),
-                },
+                [query_text],
+                include=fetch_include,
+                n_results=fetch_k,
+                where=where,
             )
+            if not policy.enabled:
+                return result
+            reranked = rerank_query_result(
+                result,
+                top_k,
+                policy.half_life_days,
+                policy.importance_boost,
+                policy.score_floor,
+            )
+            # 调用方没要的字段不外泄
+            for key in ("metadatas", "distances"):
+                if key not in include:
+                    reranked.pop(key, None)
+            return reranked
 
     @require_init
     async def get_all_notes(
@@ -457,3 +490,46 @@ class AsyncUserMemory:
                 self._collection.get, where={"user_id": user_id}, include=[]
             )
             return len(result["ids"])
+
+    @require_init
+    async def sweep_decay(self, policy: DecayConfig) -> dict[str, int]:
+        """扫描记忆库：超龄先降级，降到 low 仍超龄则清理。"""
+        now = datetime.now(utc)
+        result = await any_to_thread(
+            self._collection.get,
+            include=["metadatas"],
+            limit=policy.sweep_batch_limit,
+        )
+        ids = result.get("ids") or []
+        metas = result.get("metadatas") or []
+        demote_ids: list[str] = []
+        demote_metas: list[dict] = []
+        purge_ids: list[str] = []
+        kept = 0
+        for i, doc_id in enumerate(ids):
+            meta = (
+                dict(metas[i]) if i < len(metas) and isinstance(metas[i], dict) else {}
+            )
+            action, new_importance = plan_action(
+                meta, now, policy.short_term_days, policy.long_term_days
+            )
+            if action == "demote" and new_importance:
+                meta["importance"] = new_importance
+                demote_ids.append(doc_id)
+                demote_metas.append(meta)
+            elif action == "purge":
+                purge_ids.append(doc_id)
+            else:
+                kept += 1
+        if demote_ids:
+            await any_to_thread(
+                self._collection.update, ids=demote_ids, metadatas=demote_metas
+            )
+        if purge_ids:
+            await any_to_thread(self._collection.delete, ids=purge_ids)
+        return {
+            "scanned": len(ids),
+            "demoted": len(demote_ids),
+            "purged": len(purge_ids),
+            "kept": kept,
+        }

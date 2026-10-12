@@ -15,6 +15,7 @@ from . import (
     memo,
     models,
     rethinking,
+    tasks,
     tools,
     vector,
 )
@@ -38,6 +39,7 @@ __all__ = [
     "memo",
     "models",
     "rethinking",
+    "tasks",
     "tools",
     "vector",
 ]

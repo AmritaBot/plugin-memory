@@ -235,6 +235,7 @@ LLM 读当前 memo → 融合新事实 → 输出新全文 → 服务端校验�
 
 每条记忆带 `user_id` / `scope` / `tags` / `importance` / `created_at`。
 `importance` 分 `low` / `medium` / `high`，可在检索时作为过滤条件。
+检索时额外回填 `decay_score`（时间退化得分），不参与过滤。
 
 ### 检索
 
@@ -247,6 +248,32 @@ LLM 读当前 memo → 融合新事实 → 输出新全文 → 服务端校验�
 
 > 距离是原始度量而非归一化相似度：`l2` 空间下其取值范围取决于向量是否归一化，
 > 因此不要跨模型比较绝对值，只用于同一查询内的相对排序。
+
+### 时间记忆退化（软衰减 + 分层清理）
+
+记忆不是永久等权 —— 越旧权重越低，超龄则逐级退化直至清理。分两段实现：
+
+**软衰减（检索期）**：`query_notes` 先多取 `overfetch` 倍候选，再按
+
+$$\text{score} = \frac{1}{1 + d} \times \max\left(0.5^{\,\text{age} / \text{half-life}},\ \text{floor}\right)$$
+
+重排后截回 `top_k`。半衰期随 `importance` 放大：`low` 为 `half_life_days`，
+`medium` 为 `1+boost` 倍，`high` 为 `1+2·boost` 倍。得分回填到元数据的
+`decay_score` 字段，便于排查。这一步**只重排、不删数据**。
+
+**硬分层（清理期）**：每条记忆按 `importance` 有一条寿命阈值 ——
+`low` = `short_term_days`、`high` = `long_term_days`、`medium` 取两者几何中值。
+后台任务按 `sweep_interval_hours` 扫描，超龄先 `high → medium → low` 逐级降级，
+降到 `low` 仍超龄才删除。降级只改 `importance`，不重新嵌入。
+
+| 动作     | 触发条件           | 效果                |
+| -------- | ------------------ | ------------------- |
+| `keep`   | `age ≤ 当前层阈值` | 不动                |
+| `demote` | 超龄且非 `low`     | `importance` 降一级 |
+| `purge`  | 超龄且已是 `low`   | 删除该条            |
+
+`created_at` 缺失或不可解析时按 `keep` 处理，避免误删。
+软衰减与分层清理都受 `[decay].enabled` 总开关控制。
 
 ---
 
@@ -522,10 +549,21 @@ flowchart TD
 
 ```toml
 # L2 记忆
-short_term_expiry_days = 7
-long_term_expiry_days = 90
 per_session_memory_limit = 50
 memo_max_chars = 1000
+
+# L2 时间记忆退化（软衰减 + 分层清理）
+[decay]
+enabled = true
+short_term_days = 7
+long_term_days = 90
+half_life_days = 30.0
+importance_boost = 1.0
+overfetch = 3
+score_floor = 0.05
+sweep_enabled = true
+sweep_interval_hours = 24
+sweep_batch_limit = 5000
 
 # L3 离线巩固循环
 [subconscious]
@@ -552,8 +590,16 @@ enable_knowledge = true
 
 | 字段                         | 默认值  | 说明                                        |
 | ---------------------------- | ------- | ------------------------------------------- |
-| `short_term_expiry_days`     | `7`     | ⚠️ **预留字段**，当前未实现自动过期清理     |
-| `long_term_expiry_days`      | `90`    | ⚠️ **预留字段**，当前未实现自动过期清理     |
+| `decay.enabled`              | `true`  | 是否启用时间记忆退化（软衰减 + 分层清理）   |
+| `decay.short_term_days`      | `7`     | `low` 层寿命阈值（天）                      |
+| `decay.long_term_days`       | `90`    | `high` 层寿命阈值（天），`medium` 取几何中值 |
+| `decay.half_life_days`       | `30.0`  | 软衰减基础半衰期（天），`low` 为基准        |
+| `decay.importance_boost`     | `1.0`   | `high` 半衰期为 `1+2·boost` 倍              |
+| `decay.overfetch`            | `3`     | 检索候选放大倍数                            |
+| `decay.score_floor`          | `0.05`  | 衰减因子下限，避免旧记忆权重归零            |
+| `decay.sweep_enabled`        | `true`  | 是否启用分层清理                            |
+| `decay.sweep_interval_hours` | `24`    | 分层清理周期（小时）                        |
+| `decay.sweep_batch_limit`    | `5000`  | 单次清理最多扫描的记忆条数                  |
 | `per_session_memory_limit`   | `50`    | 单个分区（uni_id）的记忆条数上限            |
 | `memo_max_chars`             | `1000`  | L1 备忘录字数硬上限                         |
 | `enabled`                    | `false` | 是否启用离线巩固循环                        |
