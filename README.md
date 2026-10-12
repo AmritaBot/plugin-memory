@@ -409,11 +409,16 @@ flowchart TD
 | `knowledge_search`  | query, top_k?                                 |
 | `knowledge_suggest` | action, title, summary, body, reason          |
 
+知识库的三个只读工具 `knowledge_list` / `knowledge_read` / `knowledge_search`
+需要 LP 权限节点 `memory.knowledge`；`lp.admin` 与 `.env` 里的超级用户始终持有。
+未授权时工具返回错误 JSON，不返回任何知识内容。
+
 ### 巩固循环工具（`rethinking/tools.py`，共 20 个）
 
 记忆与 session/画像工具注册在隔离的 `_SUBCONSCIOUS_TOOLS` 上，不污染全局工具管理器。
-知识库的 `list`/`read`/`search` 双重注册（表层 + 循环均可调用）；
-`create`/`update`/`delete` 仅循环可用，表层通过 `knowledge_suggest` 提交建议。
+知识库的 `list`/`read`/`search` 双重注册：循环侧不受限，表层（对话 LLM）走
+`memory.knowledge` 权限校验；`create`/`update`/`delete` 仅循环可用，
+表层通过 `knowledge_suggest` 提交建议。
 
 | 工具                             | 用途                                   |
 | -------------------------------- | -------------------------------------- |

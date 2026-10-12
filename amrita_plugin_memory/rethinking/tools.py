@@ -10,7 +10,7 @@ from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 from typing import Any
 
-from amrita_core import on_tools
+from amrita_core import ToolContext, on_tools
 from amrita_core.libchat import call_completion, get_last_response
 from amrita_core.types import CONTENT_LIST_TYPE, Message
 from chromadb import GetResult
@@ -18,6 +18,7 @@ from jinja2 import Template
 from nonebot import logger
 
 from ..keys import make_scope_id
+from ..permissions import can_read_knowledge, get_event_from_tool_ctx
 from ..vector import AsyncUserMemory, MemoryMetadata, get_db_conn
 from . import _state
 from .consts import DEFAULT_SEND_PROMPT, ensure_prompt_file, load_character_prompt
@@ -693,6 +694,39 @@ async def subconscious_knowledge_search(data: dict[str, Any]) -> str:
             f"knowledge_search error: {e}"
         )
         return _tools_err(str(e))
+
+
+# 会话侧只读入口：同一套实现，额外校验 LP 节点 memory.knowledge
+
+
+def _deny_knowledge() -> str:
+    return _tools_err(
+        "无权限读取知识库（需要 LP 节点 memory.knowledge，或 lp.admin / 超级用户）"
+    )
+
+
+@on_tools(KNOWLEDGE_LIST_SCHEMA, strict=True, custom_run=True)
+async def knowledge_list_authorized(ctx: ToolContext) -> str | None:
+    """对话 LLM 列出知识库条目，需要 memory.knowledge 权限。"""
+    if not await can_read_knowledge(get_event_from_tool_ctx(ctx)):
+        return _deny_knowledge()
+    return await subconscious_knowledge_list(ctx.data)
+
+
+@on_tools(KNOWLEDGE_READ_SCHEMA, strict=True, custom_run=True)
+async def knowledge_read_authorized(ctx: ToolContext) -> str | None:
+    """对话 LLM 读取知识库条目，需要 memory.knowledge 权限。"""
+    if not await can_read_knowledge(get_event_from_tool_ctx(ctx)):
+        return _deny_knowledge()
+    return await subconscious_knowledge_read(ctx.data)
+
+
+@on_tools(KNOWLEDGE_SEARCH_SCHEMA, strict=True, custom_run=True)
+async def knowledge_search_authorized(ctx: ToolContext) -> str | None:
+    """对话 LLM 语义搜索知识库，需要 memory.knowledge 权限。"""
+    if not await can_read_knowledge(get_event_from_tool_ctx(ctx)):
+        return _deny_knowledge()
+    return await subconscious_knowledge_search(ctx.data)
 
 
 # 知识建议：对话 LLM -> 潜意识 Agent 审查管线
