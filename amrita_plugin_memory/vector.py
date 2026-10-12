@@ -423,6 +423,8 @@ class AsyncUserMemory:
                         fetch_include.append(key)
             fetch_k = max(top_k, 1)
             if policy.enabled and policy.overfetch > 1:
+                # 只按分区（单个 uni_id）取 id，量级受 per_session_memory_limit 约束；
+                # 需要准确条数才能把 n_results 压到实际数量以内
                 total = len(
                     (
                         await any_to_thread(
@@ -493,43 +495,85 @@ class AsyncUserMemory:
 
     @require_init
     async def sweep_decay(self, policy: DecayConfig) -> dict[str, int]:
-        """扫描记忆库：超龄先降级，降到 low 仍超龄则清理。"""
+        """扫描记忆库：超龄先降级，降到 low 仍超龄则清理。
+
+        分两趟：先只读分页扫描，把候选按分区归组；再逐分区持锁复核并应用。
+        只读扫描避免边扫边删导致 offset 漂移，锁内复核避免覆盖并发编辑。
+        """
         now = datetime.now(utc)
-        result = await any_to_thread(
-            self._collection.get,
-            include=["metadatas"],
-            limit=policy.sweep_batch_limit,
-        )
-        ids = result.get("ids") or []
-        metas = result.get("metadatas") or []
-        demote_ids: list[str] = []
-        demote_metas: list[dict] = []
-        purge_ids: list[str] = []
-        kept = 0
-        for i, doc_id in enumerate(ids):
-            meta = (
-                dict(metas[i]) if i < len(metas) and isinstance(metas[i], dict) else {}
+        scan_limit = policy.sweep_batch_limit
+        page_size = max(1, min(1000, scan_limit))
+        offset = 0
+        scanned = 0
+        candidates: defaultdict[str, list[str]] = defaultdict(list)
+
+        while scanned < scan_limit:
+            page = await any_to_thread(
+                self._collection.get,
+                include=["metadatas"],
+                limit=min(page_size, scan_limit - scanned),
+                offset=offset,
             )
-            action, new_importance = plan_action(
-                meta, now, policy.short_term_days, policy.long_term_days
-            )
-            if action == "demote" and new_importance:
-                meta["importance"] = new_importance
-                demote_ids.append(doc_id)
-                demote_metas.append(meta)
-            elif action == "purge":
-                purge_ids.append(doc_id)
-            else:
-                kept += 1
-        if demote_ids:
-            await any_to_thread(
-                self._collection.update, ids=demote_ids, metadatas=demote_metas
-            )
-        if purge_ids:
-            await any_to_thread(self._collection.delete, ids=purge_ids)
+            ids = page.get("ids") or []
+            if not ids:
+                break
+            metas = page.get("metadatas") or []
+            for i, doc_id in enumerate(ids):
+                meta = (
+                    dict(metas[i])
+                    if i < len(metas) and isinstance(metas[i], dict)
+                    else {}
+                )
+                action, _ = plan_action(
+                    meta, now, policy.short_term_days, policy.long_term_days
+                )
+                if action != "keep":
+                    candidates[str(meta.get("user_id", ""))].append(doc_id)
+            scanned += len(ids)
+            offset += len(ids)
+
+        demoted = 0
+        purged = 0
+        for user_id, doc_ids in candidates.items():
+            async with get_lock(self._collection_name, user_id):
+                # 扫描到应用之间可能已被编辑或删除，锁内重新读一遍再决策
+                fresh = await any_to_thread(
+                    self._collection.get, ids=doc_ids, include=["metadatas"]
+                )
+                fresh_ids = fresh.get("ids") or []
+                fresh_metas = fresh.get("metadatas") or []
+                demote_ids: list[str] = []
+                demote_metas: list[dict] = []
+                purge_ids: list[str] = []
+                for i, doc_id in enumerate(fresh_ids):
+                    meta = (
+                        dict(fresh_metas[i])
+                        if i < len(fresh_metas) and isinstance(fresh_metas[i], dict)
+                        else {}
+                    )
+                    action, new_importance = plan_action(
+                        meta, now, policy.short_term_days, policy.long_term_days
+                    )
+                    if action == "demote" and new_importance:
+                        meta["importance"] = new_importance
+                        demote_ids.append(doc_id)
+                        demote_metas.append(meta)
+                    elif action == "purge":
+                        purge_ids.append(doc_id)
+                if demote_ids:
+                    await any_to_thread(
+                        self._collection.update,
+                        ids=demote_ids,
+                        metadatas=demote_metas,
+                    )
+                if purge_ids:
+                    await any_to_thread(self._collection.delete, ids=purge_ids)
+                demoted += len(demote_ids)
+                purged += len(purge_ids)
+
         return {
-            "scanned": len(ids),
-            "demoted": len(demote_ids),
-            "purged": len(purge_ids),
-            "kept": kept,
+            "scanned": scanned,
+            "demoted": demoted,
+            "purged": purged,
+            "kept": max(scanned - demoted - purged, 0),
         }

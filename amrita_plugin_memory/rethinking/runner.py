@@ -136,6 +136,9 @@ class SubconsciousRunner:
             f"delay={delay_minutes:.0f}min (raw={raw:.0f}min, cap={cap}min)"
         )
         self._schedule_once(int(delay_minutes * 60))
+        # 惩罚计数落盘，避免重启后丢掉已累积的退避
+        with contextlib.suppress(Exception):
+            await self._save_state()
 
     def _schedule_once(self, delay_seconds: int) -> None:
         run_date = datetime.now(timezone.utc) + timedelta(seconds=delay_seconds)

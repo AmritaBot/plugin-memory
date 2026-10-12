@@ -447,12 +447,15 @@ async def subconscious_duplicate_helper(data: dict[str, Any]) -> str:
         shard = items[offset : offset + limit]
 
         threshold = float(data.get("similarity_threshold") or 0.85)
-        cluster_ids = _cluster_candidates(
-            [str(it["id"]) for it in shard],
-            [it["embedding"] for it in shard],
+        # 跨分片聚类：相似记忆可能落在不同分片，只看当前分片会漏判
+        all_groups = _cluster_candidates(
+            [str(it["id"]) for it in items],
+            [it["embedding"] for it in items],
             threshold,
         )
-        for it in shard:
+        shard_ids = {str(it["id"]) for it in shard}
+        cluster_ids = [group for group in all_groups if shard_ids.intersection(group)]
+        for it in items:
             it.pop("embedding", None)
 
         tag_hint = f" tag='{tag_filter}'" if tag_filter else ""
@@ -466,6 +469,8 @@ async def subconscious_duplicate_helper(data: dict[str, Any]) -> str:
             f"注意事项：\n"
             f"- 仅合并真正重复/高度相似的条目，不要合并不同主题的记忆\n"
             f"- 合并时保留更丰富的细节，去除重复表述\n"
+            f"- 分片遍历期间先不要删改，把所有分片看完再统一处理，"
+            f"否则后面的分片会前移导致漏看\n"
             f"- 完成后调用 subconscious_get_memory_stats 验证总量是否下降"
         )
         has_more = offset + len(shard) < total
@@ -572,7 +577,6 @@ def _get_kb_manager():
     return runner._kb_manager
 
 
-@on_tools(KNOWLEDGE_LIST_SCHEMA, strict=True)
 @on_tools(KNOWLEDGE_LIST_SCHEMA, strict=True, bound_to=_SUBCONSCIOUS_TOOLS)
 async def subconscious_knowledge_list(data: dict[str, Any]) -> str:
     try:
@@ -590,7 +594,6 @@ async def subconscious_knowledge_list(data: dict[str, Any]) -> str:
         return _tools_err(str(e))
 
 
-@on_tools(KNOWLEDGE_READ_SCHEMA, strict=True)
 @on_tools(KNOWLEDGE_READ_SCHEMA, strict=True, bound_to=_SUBCONSCIOUS_TOOLS)
 async def subconscious_knowledge_read(data: dict[str, Any]) -> str:
     try:
@@ -674,7 +677,6 @@ async def subconscious_knowledge_delete(data: dict[str, Any]) -> str:
         return _tools_err(str(e))
 
 
-@on_tools(KNOWLEDGE_SEARCH_SCHEMA, strict=True)
 @on_tools(KNOWLEDGE_SEARCH_SCHEMA, strict=True, bound_to=_SUBCONSCIOUS_TOOLS)
 async def subconscious_knowledge_search(data: dict[str, Any]) -> str:
     try:

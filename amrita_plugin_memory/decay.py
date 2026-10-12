@@ -77,14 +77,19 @@ def decay_score(
 
 
 def tier_days(importance: str, short_days: float, long_days: float) -> float:
-    """该 importance 层的寿命阈值（天）。medium 取 short/long 的几何中值。"""
+    """该 importance 层的寿命阈值（天）。medium 取 short/long 的几何中值。
+
+    两个配置项写反时按大小重排，保证 low ≤ medium ≤ high 单调，
+    否则 high 会比 medium 先过期。
+    """
+    low_days, high_days = sorted((float(short_days), float(long_days)))
     if importance == "low":
-        return float(short_days)
+        return low_days
     if importance == "high":
-        return float(long_days)
-    if long_days > short_days:
-        return math.sqrt(float(short_days) * float(long_days))
-    return float(short_days)
+        return high_days
+    if high_days > low_days:
+        return math.sqrt(low_days * high_days)
+    return low_days
 
 
 def plan_action(
@@ -111,7 +116,9 @@ def plan_action(
 
 
 def _inner_list(value: Any, size: int) -> list:
-    """取 QueryResult 里 list-of-list 的内层；缺失时补 None。"""
+    """取 QueryResult 里 list-of-list 的内层；兼容 numpy 数组；缺失时补 None。"""
+    if hasattr(value, "tolist"):  # chroma 的 embeddings 可能是 ndarray
+        value = value.tolist()
     if isinstance(value, list) and value and isinstance(value[0], list):
         inner = list(value[0])
     else:
