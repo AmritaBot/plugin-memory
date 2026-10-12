@@ -1,4 +1,8 @@
-"""潜意识工具处理器 — 模块导入时自动注册到全局 ToolsManager。"""
+"""潜意识工具处理器。
+
+所有 subconscious_* 通过 bound_to 注册到隔离的 Subconscious 工具管理器，
+不污染全局 ToolsManager；knowledge_suggest 面向对话 LLM，注册到全局管理器。
+"""
 
 import asyncio
 import json
@@ -40,6 +44,15 @@ from .schemas import (
     UPDATE_PROFILE_SCHEMA,
     WRITE_MEMORY_SCHEMA,
 )
+
+try:  # chromadb 自带 numpy；缺了只是少一层预筛，不影响主流程
+    import numpy as _np
+except ImportError:
+    _np = None
+
+#: duplicate_helper 单次返回的记忆条数默认值 / 上限
+_DUPLICATE_DEFAULT_LIMIT = 40
+_DUPLICATE_MAX_LIMIT = 200
 
 _SUBCONSCIOUS_TOOLS = _state.get_tools_manager()
 
@@ -328,21 +341,62 @@ async def _generate_send_content(intent: str, memory_context: str) -> str:
     return response.content.strip()
 
 
+def _cluster_candidates(
+    ids: Sequence[str], embeddings: Sequence[Any], threshold: float
+) -> list[list[str]]:
+    """按余弦相似度把候选记忆聚成重复簇；向量不可用时返回空。"""
+    if _np is None or len(ids) < 2 or len(embeddings) != len(ids):
+        return []
+    try:
+        matrix = _np.asarray(embeddings, dtype=_np.float32)
+        if matrix.ndim != 2 or matrix.shape[0] != len(ids):
+            return []
+        norms = _np.linalg.norm(matrix, axis=1, keepdims=True)
+        matrix = matrix / _np.where(norms == 0, 1.0, norms)
+        similar = (matrix @ matrix.T) >= threshold
+        parent = list(range(len(ids)))
+
+        def find(x: int) -> int:
+            while parent[x] != x:
+                parent[x] = parent[parent[x]]
+                x = parent[x]
+            return x
+
+        for i in range(len(ids)):
+            for j in range(i + 1, len(ids)):
+                if not similar[i, j]:
+                    continue
+                ri, rj = find(i), find(j)
+                if ri != rj:
+                    parent[rj] = ri
+
+        groups: dict[int, list[str]] = {}
+        for i, doc_id in enumerate(ids):
+            groups.setdefault(find(i), []).append(doc_id)
+        return [g for g in groups.values() if len(g) > 1]
+    except Exception as e:
+        logger.debug(f"[Subconscious] Candidate clustering failed: {e}")
+        return []
+
+
 @on_tools(DUPLICATE_HELPER_SCHEMA, strict=True, bound_to=_SUBCONSCIOUS_TOOLS)
 async def subconscious_duplicate_helper(data: dict[str, Any]) -> str:
-    """返回指定范围内全部记忆 + LLM 合并指导 prompt。
+    """返回指定范围内的记忆分片 + LLM 合并指导 prompt。
 
-    Python 侧不做语义去重，只做过滤排序和 prompt 生成，
-    把"哪些是重复的"的判断交给 LLM。
+    Python 侧只做过滤、排序、分片，并用已存向量预筛近邻候选簇；
+    "哪些是重复的"仍交给 LLM 判断。
     """
     ope = _make_operator()
     await ope.init()
     pid = _get_partition_id()
     try:
-        result = await ope.get_all_notes(pid, include=["metadatas", "documents"])
+        result = await ope.get_all_notes(
+            pid, include=["metadatas", "documents", "embeddings"]
+        )
         if not result or not result.get("ids"):
             return _tools_ok(
                 total=0,
+                returned=0,
                 instruction="记忆库为空，无需整理。",
                 memories=[],
             )
@@ -351,6 +405,8 @@ async def subconscious_duplicate_helper(data: dict[str, Any]) -> str:
         metadatas: Sequence[Mapping[str, Any]] = result.get("metadatas") or [
             {} for _ in ids
         ]
+        raw_embeddings = result.get("embeddings")
+        embeddings: Sequence[Any] = [] if raw_embeddings is None else raw_embeddings
 
         tag_filter = data.get("tag")
         imp_filter = data.get("importance")
@@ -371,6 +427,7 @@ async def subconscious_duplicate_helper(data: dict[str, Any]) -> str:
                     "importance": meta.get("importance", "medium"),
                     "created_at": str(meta.get("created_at", "")),
                     "length": len(doc),
+                    "embedding": embeddings[i] if i < len(embeddings) else None,
                 }
             )
 
@@ -382,12 +439,27 @@ async def subconscious_duplicate_helper(data: dict[str, Any]) -> str:
         else:
             items.sort(key=lambda x: str(x.get("created_at", "")))
 
-        # 生成指导 prompt
+        # 分片：不再一次性把所有正文塞进上下文
+        total = len(items)
+        limit = int(data.get("limit") or _DUPLICATE_DEFAULT_LIMIT)
+        limit = max(1, min(limit, _DUPLICATE_MAX_LIMIT))
+        offset = max(0, int(data.get("offset") or 0))
+        shard = items[offset : offset + limit]
+
+        threshold = float(data.get("similarity_threshold") or 0.85)
+        cluster_ids = _cluster_candidates(
+            [str(it["id"]) for it in shard],
+            [it["embedding"] for it in shard],
+            threshold,
+        )
+        for it in shard:
+            it.pop("embedding", None)
+
         tag_hint = f" tag='{tag_filter}'" if tag_filter else ""
         imp_hint = f" importance={imp_filter}" if imp_filter else ""
         instruction = (
-            f"以下是{tag_hint}{imp_hint}的全部 {len(items)} 条记忆。"
-            f"请逐条阅读，识别内容重复或高度相似的条目。\n\n"
+            f"以下是{tag_hint}{imp_hint}记忆的第 {offset}~{offset + len(shard)} 条"
+            f"（共 {total} 条）。请逐条阅读，识别内容重复或高度相似的条目。\n\n"
             f"对于每组重复条目：\n"
             f"1. 用 subconscious_update_memory 将最重要的那一条更新为合并后的精炼内容\n"
             f"2. 用 subconscious_delete_memory 删除其余冗余条目\n\n"
@@ -396,11 +468,27 @@ async def subconscious_duplicate_helper(data: dict[str, Any]) -> str:
             f"- 合并时保留更丰富的细节，去除重复表述\n"
             f"- 完成后调用 subconscious_get_memory_stats 验证总量是否下降"
         )
-        return _tools_ok(
-            total=len(items),
-            instruction=instruction,
-            memories=items,
-        )
+        has_more = offset + len(shard) < total
+        payload: dict[str, Any] = {
+            "total": total,
+            "returned": len(shard),
+            "offset": offset,
+            "has_more": has_more,
+            "instruction": instruction,
+            "memories": shard,
+        }
+        if cluster_ids:
+            payload["candidate_duplicate_groups"] = cluster_ids
+            payload["instruction"] += (
+                f"\n\n已用向量预筛出 {len(cluster_ids)} 组高相似候选簇"
+                f"（similarity >= {threshold}），见 candidate_duplicate_groups，"
+                f"优先在这些簇内裁决是否合并。"
+            )
+        if has_more:
+            payload["instruction"] += (
+                f"\n\n本片已结束，如需检查后续记忆，用 offset={offset + len(shard)} 再调一次。"
+            )
+        return _tools_ok(**payload)
     except Exception as e:
         logger.opt(exception=e, colors=True, raw=True).exception(
             f"subconscious_duplicate_helper error: {e}"

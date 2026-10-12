@@ -11,7 +11,6 @@ from . import _state
 
 
 async def _setup_subconscious_hook() -> None:
-
     pre_chat_hook = on_precompletion(priority=10, block=False)
 
     @pre_chat_hook.handle()
@@ -22,10 +21,16 @@ async def _setup_subconscious_hook() -> None:
         amrita_ctx = try_get_amrita_ctx(event.chat_object)
         if amrita_ctx is None:
             return
-        if str(amrita_ctx["event"].user_id) != runner._config.target_user_id:
+        if str(amrita_ctx["event"].user_id) != runner.target_user_id:
             return
 
-        await runner.cancel_and_reschedule()
+        try:
+            await runner.cancel_and_reschedule()
+        except Exception as e:
+            # 调度失败不能影响用户这条消息的处理
+            logger.opt(exception=e, colors=True, raw=True).error(
+                f"[Subconscious] Reschedule failed: {e}"
+            )
 
         pending = _state.get_pending()
         if pending and runner._config.allow_send_to_user:
@@ -53,13 +58,17 @@ async def _subconscious_startup() -> None:
     if not cfg.enabled or not cfg.target_user_id:
         logger.debug("[Subconscious] Not enabled or no target user, skip")
         return
-    runner = SubconsciousRunner(cfg)
-    _state.set_runner(runner)
-    await runner.start()
+    # 先挂触发钩子：钩子失败就没有触发器，此时不能启动 runner，否则 DMN 静默死掉
     try:
         await _setup_subconscious_hook()
     except Exception as e:
-        logger.warning(f"[Subconscious] Hook setup failed: {e}")
+        logger.opt(exception=e, colors=True, raw=True).error(
+            f"[Subconscious] Hook setup failed, DMN will NOT start: {e}"
+        )
+        return
+    runner = SubconsciousRunner(cfg)
+    _state.set_runner(runner)
+    await runner.start()
 
 
 @get_driver().on_shutdown

@@ -83,6 +83,10 @@ class SubconsciousRunner:
     def is_running(self) -> bool:
         return self._is_running
 
+    @property
+    def target_user_id(self) -> str:
+        return self._config.target_user_id
+
     def _build_config(self) -> AmritaConfig:
         """构建自定义 AmritaConfig —— 从全局拷贝并覆写本插件关心的字段。"""
         cfg = get_config().model_copy(deep=True)
@@ -141,6 +145,7 @@ class SubconsciousRunner:
             run_date=run_date,
             id=self._job_id,
             misfire_grace_time=30,
+            replace_existing=True,
         )
 
     async def _run(self) -> None:
@@ -155,7 +160,13 @@ class SubconsciousRunner:
             self._is_running = False
 
     async def _run_cycle(self) -> None:
-        preset = await _state.get_preset()
+        try:
+            preset = await _state.get_preset()
+        except Exception as e:
+            logger.opt(exception=e, colors=True, raw=True).error(
+                f"[Subconscious] No usable preset, skip cycle: {e}"
+            )
+            return
         prompt_text = await self._load_prompt()
         user_msg_text = (
             f"现在是第 {self._total_runs + 1} 次潜意识推理循环。"
@@ -227,6 +238,9 @@ class SubconsciousRunner:
 
         if save_ok:
             _state.reset_penalty()
+            # 惩罚清零也落盘，否则重启后残留旧退避
+            with contextlib.suppress(Exception):
+                await self._save_state()
             logger.info(
                 f"[Subconscious] Cycle done (total_runs={self._total_runs}), "
                 f"penalty reset, waiting for next user chat"
@@ -304,6 +318,7 @@ class SubconsciousRunner:
             if not payload:
                 return
             self._total_runs = int(payload.get("total_runs", 0))
+            _state.set_penalty_count(int(payload.get("penalty", 0)))
             abstracts = payload.get("last_abstracts", [])
             self._last_abstracts = (
                 [str(a) for a in abstracts][: self._config.max_abstracts]
@@ -357,6 +372,7 @@ class SubconsciousRunner:
             {
                 "total_runs": self._total_runs,
                 "last_run_time": datetime.now(timezone.utc).isoformat(),
+                "penalty": _state.get_penalty_count(),
                 "last_abstracts": self._last_abstracts,
                 "pending_messages": _state.get_pending(),
                 "knowledge_suggestions": _state.get_knowledge_suggestions(),
@@ -411,22 +427,22 @@ class SubconsciousRunner:
             pid = make_scope_id(self._config.target_user_id, is_group=False)
             ope = AsyncUserMemory(get_db_conn())
             await ope.init()
-            result = await ope.get_all_notes(pid, include=["metadatas"])
-            if result and result.get("ids"):
-                total = len(result["ids"])
-                if total > self._config.memory_warn_threshold:
-                    low_count = sum(
-                        1
-                        for m in (result.get("metadatas") or [])
-                        if isinstance(m, dict) and m.get("importance") == "low"
-                    )
-                    prompt += (
-                        f"\n\n⚠️ 当前记忆库有 {total} 条记忆"
-                        f"（其中低重要性 {low_count} 条）。"
-                        f"建议本轮优先调用 subconscious_get_memory_stats 分析分布，"
-                        f"然后用 subconscious_duplicate_helper 获取待整理列表，"
-                        f"进行合并去重和低质记忆清理。"
-                    )
+            # 先取轻量计数，超阈值才拉全量算分布
+            total = await ope.count_user_notes(pid)
+            if total > self._config.memory_warn_threshold:
+                result = await ope.get_all_notes(pid, include=["metadatas"])
+                low_count = sum(
+                    1
+                    for m in (result.get("metadatas") or [])
+                    if isinstance(m, dict) and m.get("importance") == "low"
+                )
+                prompt += (
+                    f"\n\n⚠️ 当前记忆库有 {total} 条记忆"
+                    f"（其中低重要性 {low_count} 条）。"
+                    f"建议本轮优先调用 subconscious_get_memory_stats 分析分布，"
+                    f"然后用 subconscious_duplicate_helper 获取待整理列表，"
+                    f"进行合并去重和低质记忆清理。"
+                )
         except Exception as e:
             logger.debug(f"[Subconscious] Memory stats query failed: {e}")
 

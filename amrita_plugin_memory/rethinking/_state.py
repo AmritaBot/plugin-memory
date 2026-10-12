@@ -41,7 +41,7 @@ def set_runner(r: SubconsciousRunner | None) -> None:
 
 
 def get_target_user_id() -> str:
-    return _runner._config.target_user_id if _runner is not None else ""
+    return _runner.target_user_id if _runner is not None else ""
 
 
 def get_pending() -> list[PendingMsg]:
