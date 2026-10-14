@@ -91,7 +91,10 @@ class SubconsciousRunner:
         """构建自定义 AmritaConfig —— 从全局拷贝并覆写本插件关心的字段。"""
         cfg = get_config().model_copy(deep=True)
         cfg.builtin.loop_reasoning_trigger = self._config.loop_detect_threshold
-        cfg.llm.enable_compaction = self._config.enable_memory_compress
+        # Core 1.x 用 context_strategy 表达压缩策略，bool 开关映射到 compact/none
+        cfg.llm.context_strategy = (
+            "compact" if self._config.enable_memory_compress else "none"
+        )
         return cfg
 
     async def start(self) -> None:
@@ -241,9 +244,11 @@ class SubconsciousRunner:
 
         if save_ok:
             _state.reset_penalty()
-            # 惩罚清零也落盘，否则重启后残留旧退避
-            with contextlib.suppress(Exception):
+            # 惩罚清零也要落盘，否则重启会加载旧退避
+            try:
                 await self._save_state()
+            except Exception as e:
+                logger.warning(f"[Subconscious] Penalty reset not persisted: {e}")
             logger.info(
                 f"[Subconscious] Cycle done (total_runs={self._total_runs}), "
                 f"penalty reset, waiting for next user chat"

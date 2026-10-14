@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from typing import Any, Literal
 
@@ -129,18 +130,18 @@ def _inner_list(value: Any, size: int) -> list:
 
 
 def rerank_query_result(
-    result: dict,
+    result: Mapping[str, Any],
     top_k: int,
     base_half_life: float,
     boost: float,
     floor: float,
     now: datetime | None = None,
-) -> dict:
+) -> dict[str, Any]:
     """按衰减得分重排 QueryResult，并截断到 top_k；meta 里回填 decay_score。"""
     now = now or datetime.now(timezone.utc)
     ids_nested = result.get("ids")
     if not ids_nested or not ids_nested[0]:
-        return result
+        return dict(result)
     ids = list(ids_nested[0])
     size = len(ids)
     metas = _inner_list(result.get("metadatas"), size)

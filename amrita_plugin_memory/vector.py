@@ -7,7 +7,7 @@ from collections.abc import Awaitable, Callable, Sequence
 from datetime import datetime
 from functools import wraps
 from inspect import iscoroutinefunction
-from typing import Any, Literal, TypeVar, overload
+from typing import Any, Literal, TypeVar, cast, overload
 from uuid import UUID
 
 import aiologic
@@ -423,17 +423,9 @@ class AsyncUserMemory:
                         fetch_include.append(key)
             fetch_k = max(top_k, 1)
             if policy.enabled and policy.overfetch > 1:
-                # 只按分区（单个 uni_id）取 id，量级受 per_session_memory_limit 约束；
-                # 需要准确条数才能把 n_results 压到实际数量以内
-                total = len(
-                    (
-                        await any_to_thread(
-                            self._collection.get, where=where, include=[]
-                        )
-                    )["ids"]
-                )
-                if total:
-                    fetch_k = min(top_k * policy.overfetch, total)
+                # 直接按 overfetch 放大候选，不再全量取 id 数条数：
+                # n_results 超过实际条数时 chroma 自己会截断
+                fetch_k = max(top_k * policy.overfetch, top_k)
             result = await any_to_thread(
                 self._collection.query,
                 query_vector[0].embedding,
@@ -455,13 +447,20 @@ class AsyncUserMemory:
             for key in ("metadatas", "distances"):
                 if key not in include:
                     reranked.pop(key, None)
-            return reranked
+            return cast(chromadb.QueryResult, reranked)
 
     @require_init
     async def get_all_notes(
-        self, user_id: str, include: chromadb.Include = ["metadatas", "documents"]
+        self,
+        user_id: str,
+        include: chromadb.Include = ["metadatas", "documents"],
+        ids: list[str] | None = None,
     ) -> chromadb.GetResult:
         async with get_lock(self._collection_name, user_id):
+            if ids is not None:
+                return await any_to_thread(
+                    self._collection.get, include=include, ids=ids
+                )
             return await any_to_thread(
                 self._collection.get,
                 include=include,

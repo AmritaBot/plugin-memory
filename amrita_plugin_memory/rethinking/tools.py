@@ -5,15 +5,17 @@
 """
 
 import asyncio
+import base64
 import json
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, cast
 
 from amrita_core import ToolContext, on_tools
 from amrita_core.libchat import call_completion, get_last_response
 from amrita_core.types import CONTENT_LIST_TYPE, Message
 from chromadb import GetResult
+from chromadb.api.types import Include
 from jinja2 import Template
 from nonebot import logger
 
@@ -380,6 +382,34 @@ def _cluster_candidates(
         return []
 
 
+_DUPLICATE_SORT_KEYS = ("created_at", "importance", "length")
+
+
+def _make_duplicate_cursor(sort_by: str, key: Any, doc_id: str) -> str:
+    """把 (排序方式, 排序键, id) 编成不透明游标。"""
+    raw = json.dumps([sort_by, key, doc_id], ensure_ascii=False).encode("utf-8")
+    return base64.urlsafe_b64encode(raw).decode("ascii")
+
+
+def _parse_duplicate_cursor(cursor: str, sort_by: str) -> tuple[Any, str] | None:
+    """解析游标；排序方式变了或格式不对就返回 None（当作从头开始）。"""
+    try:
+        raw = base64.urlsafe_b64decode(cursor.encode("ascii")).decode("utf-8")
+        parsed = json.loads(raw)
+    except Exception:
+        return None
+    if not isinstance(parsed, list) or len(parsed) != 3:
+        return None
+    c_sort, key, doc_id = parsed
+    if c_sort != sort_by or not isinstance(doc_id, str) or not doc_id:
+        return None
+    if sort_by == "created_at" and not isinstance(key, str):
+        return None
+    if sort_by in ("importance", "length") and not isinstance(key, int):
+        return None
+    return key, doc_id
+
+
 @on_tools(DUPLICATE_HELPER_SCHEMA, strict=True, bound_to=_SUBCONSCIOUS_TOOLS)
 async def subconscious_duplicate_helper(data: dict[str, Any]) -> str:
     """返回指定范围内的记忆分片 + LLM 合并指导 prompt。
@@ -391,9 +421,14 @@ async def subconscious_duplicate_helper(data: dict[str, Any]) -> str:
     await ope.init()
     pid = _get_partition_id()
     try:
-        result = await ope.get_all_notes(
-            pid, include=["metadatas", "documents", "embeddings"]
-        )
+        sort_by = str(data.get("sort_by", "created_at"))
+        if sort_by not in _DUPLICATE_SORT_KEYS:
+            sort_by = "created_at"
+        # 正文只在按长度排序时全量取，其余情况只取当前分片的正文
+        include: Include = ["metadatas", "embeddings"]
+        if sort_by == "length":
+            include.append("documents")
+        result = await ope.get_all_notes(pid, include=include)
         if not result or not result.get("ids"):
             return _tools_ok(
                 total=0,
@@ -402,67 +437,110 @@ async def subconscious_duplicate_helper(data: dict[str, Any]) -> str:
                 memories=[],
             )
         ids: list[str] = result["ids"]
-        documents: list[str] = result.get("documents") or ["" for _ in ids]
+        documents = result.get("documents")
         metadatas: Sequence[Mapping[str, Any]] = result.get("metadatas") or [
             {} for _ in ids
         ]
         raw_embeddings = result.get("embeddings")
-        embeddings: Sequence[Any] = [] if raw_embeddings is None else raw_embeddings
+        embeddings: Sequence[Any] = (
+            [] if raw_embeddings is None else cast(Sequence[Any], raw_embeddings)
+        )
 
         tag_filter = data.get("tag")
         imp_filter = data.get("importance")
-        sort_by = str(data.get("sort_by", "created_at"))
+        importance_order = {"high": 0, "medium": 1, "low": 2}
         items: list[dict[str, Any]] = []
         for i, doc_id in enumerate(ids):
             meta = metadatas[i] if i < len(metadatas) else {}
-            doc = documents[i] if i < len(documents) else ""
             if tag_filter and str(meta.get("tags", "")) != tag_filter:
                 continue
             if imp_filter and str(meta.get("importance", "")) != imp_filter:
                 continue
-            items.append(
-                {
-                    "id": doc_id,
-                    "content": doc,
-                    "tags": meta.get("tags", ""),
-                    "importance": meta.get("importance", "medium"),
-                    "created_at": str(meta.get("created_at", "")),
-                    "length": len(doc),
-                    "embedding": embeddings[i] if i < len(embeddings) else None,
-                }
-            )
+            doc = documents[i] if documents and i < len(documents) else ""
+            item: dict[str, Any] = {
+                "id": str(doc_id),
+                "content": doc,
+                "tags": meta.get("tags", ""),
+                "importance": meta.get("importance", "medium"),
+                "created_at": str(meta.get("created_at", "")),
+                "length": len(doc),
+                "embedding": embeddings[i] if i < len(embeddings) else None,
+            }
+            if sort_by == "importance":
+                item["_key"] = importance_order.get(str(item["importance"]), 1)
+            elif sort_by == "length":
+                item["_key"] = -int(item["length"])
+            else:
+                item["_key"] = str(item["created_at"])
+            items.append(item)
 
-        if sort_by == "importance":
-            importance_order = {"high": 0, "medium": 1, "low": 2}
-            items.sort(key=lambda x: importance_order.get(str(x["importance"]), 1))
-        elif sort_by == "length":
-            items.sort(key=lambda x: x["length"], reverse=True)
-        else:
-            items.sort(key=lambda x: str(x.get("created_at", "")))
+        # 排序键后面缀 id，保证全序稳定，游标才能不重不漏
+        items.sort(key=lambda x: (x["_key"], x["id"]))
 
-        # 分片：不再一次性把所有正文塞进上下文
         total = len(items)
         limit = int(data.get("limit") or _DUPLICATE_DEFAULT_LIMIT)
         limit = max(1, min(limit, _DUPLICATE_MAX_LIMIT))
-        offset = max(0, int(data.get("offset") or 0))
-        shard = items[offset : offset + limit]
+        # 游标指向上片最后一条，前几片被删改也不会让后面的记忆前移漏看
+        passed = 0
+        cursor = str(data.get("cursor") or "")
+        if cursor:
+            parsed = _parse_duplicate_cursor(cursor, sort_by)
+            if parsed is not None:
+                while (
+                    passed < total
+                    and (items[passed]["_key"], items[passed]["id"]) <= parsed
+                ):
+                    passed += 1
+        shard = items[passed : passed + limit]
+        if not shard:
+            return _tools_ok(
+                total=total,
+                returned=0,
+                has_more=False,
+                instruction="本范围内没有更多可检查的记忆。",
+                memories=[],
+            )
 
         threshold = float(data.get("similarity_threshold") or 0.85)
         # 跨分片聚类：相似记忆可能落在不同分片，只看当前分片会漏判
         all_groups = _cluster_candidates(
-            [str(it["id"]) for it in items],
+            [it["id"] for it in items],
             [it["embedding"] for it in items],
             threshold,
         )
-        shard_ids = {str(it["id"]) for it in shard}
+        shard_ids = {it["id"] for it in shard}
         cluster_ids = [group for group in all_groups if shard_ids.intersection(group)]
+
+        has_more = passed + len(shard) < total
+        next_cursor = ""
+        if has_more:
+            last = shard[-1]
+            next_cursor = _make_duplicate_cursor(sort_by, last["_key"], last["id"])
+
+        # 补齐当前分片的正文（前面为省内存没有全量取）
+        if sort_by != "length":
+            shard_docs = await ope.get_all_notes(
+                pid, include=["documents"], ids=[it["id"] for it in shard]
+            )
+            doc_map = {
+                str(k): v
+                for k, v in zip(
+                    shard_docs.get("ids") or [], shard_docs.get("documents") or []
+                )
+            }
+            for it in shard:
+                doc = doc_map.get(it["id"]) or ""
+                it["content"] = doc
+                it["length"] = len(doc)
+
         for it in items:
             it.pop("embedding", None)
+            it.pop("_key", None)
 
         tag_hint = f" tag='{tag_filter}'" if tag_filter else ""
         imp_hint = f" importance={imp_filter}" if imp_filter else ""
         instruction = (
-            f"以下是{tag_hint}{imp_hint}记忆的第 {offset}~{offset + len(shard)} 条"
+            f"以下是{tag_hint}{imp_hint}记忆的第 {passed + 1}~{passed + len(shard)} 条"
             f"（共 {total} 条）。请逐条阅读，识别内容重复或高度相似的条目。\n\n"
             f"对于每组重复条目：\n"
             f"1. 用 subconscious_update_memory 将最重要的那一条更新为合并后的精炼内容\n"
@@ -470,19 +548,18 @@ async def subconscious_duplicate_helper(data: dict[str, Any]) -> str:
             f"注意事项：\n"
             f"- 仅合并真正重复/高度相似的条目，不要合并不同主题的记忆\n"
             f"- 合并时保留更丰富的细节，去除重复表述\n"
-            f"- 分片遍历期间先不要删改，把所有分片看完再统一处理，"
-            f"否则后面的分片会前移导致漏看\n"
             f"- 完成后调用 subconscious_get_memory_stats 验证总量是否下降"
         )
-        has_more = offset + len(shard) < total
         payload: dict[str, Any] = {
             "total": total,
             "returned": len(shard),
-            "offset": offset,
+            "passed": passed,
             "has_more": has_more,
             "instruction": instruction,
             "memories": shard,
         }
+        if next_cursor:
+            payload["next_cursor"] = next_cursor
         if cluster_ids:
             payload["candidate_duplicate_groups"] = cluster_ids
             payload["instruction"] += (
@@ -492,7 +569,8 @@ async def subconscious_duplicate_helper(data: dict[str, Any]) -> str:
             )
         if has_more:
             payload["instruction"] += (
-                f"\n\n本片已结束，如需检查后续记忆，用 offset={offset + len(shard)} 再调一次。"
+                "\n\n本片已结束，如需检查后续记忆，"
+                "把 next_cursor 原样传回 cursor 再调一次。"
             )
         return _tools_ok(**payload)
     except Exception as e:

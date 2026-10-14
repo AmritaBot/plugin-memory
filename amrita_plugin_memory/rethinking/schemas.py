@@ -151,7 +151,7 @@ DUPLICATE_HELPER_SCHEMA = FunctionDefinitionSchema(
     description=(
         "获取记忆库中指定范围的记忆条目（分片返回），返回压缩指导 prompt。"
         "返回里带 candidate_duplicate_groups（向量预筛的高相似候选簇），"
-        "应优先在这些簇内判断是否重复；has_more 为真时用更大的 offset 继续。"
+        "应优先在这些簇内判断是否重复；has_more 为真时把返回的 next_cursor 原样传回 cursor 继续。"
         "调用后应仔细分析返回内容中重复/高度相似的条目，"
         "用 subconscious_update_memory 合并精炼，subconscious_delete_memory 删除冗余。"
         "仅在需要主动整理/压缩记忆库时调用，不要每轮都调用。"
@@ -178,10 +178,9 @@ DUPLICATE_HELPER_SCHEMA = FunctionDefinitionSchema(
                 default=40,
                 description="本片最多返回多少条记忆，默认 40，上限 200",
             ),
-            "offset": FunctionPropertySchema(
-                type="integer",
-                default=0,
-                description="从第几条开始，配合返回的 has_more 分片遍历",
+            "cursor": FunctionPropertySchema(
+                type="string",
+                description="续页游标：原样传回上一片返回的 next_cursor；遍历期间删改过前几片也不会漏看",
             ),
             "similarity_threshold": FunctionPropertySchema(
                 type="number",
