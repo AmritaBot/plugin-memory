@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
+import os
 import re
+import tempfile
 import uuid
 from datetime import datetime, timezone
+from functools import wraps
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
@@ -32,6 +36,35 @@ if TYPE_CHECKING:
 _SPLITTER = re.compile(r"^---\s*$", re.MULTILINE)
 
 
+def _atomic_write_text(path: Path, text: str) -> None:
+    """同目录临时文件 + fsync + os.replace，避免写一半把文件毁掉。"""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(
+        dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp"
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
+
+
+def _locked(func):
+    """串行化知识库的写操作（文件 + 索引 + 向量三步非原子）。"""
+
+    @wraps(func)
+    async def wrapper(self, *args, **kwargs):
+        async with self._lock:
+            return await func(self, *args, **kwargs)
+
+    return wrapper
+
+
 class KnowledgeBaseManager:
     """全局知识库。
 
@@ -53,6 +86,8 @@ class KnowledgeBaseManager:
         self._max_chars = max_chars
         self._collection: Collection | None = None
         self._index: list[KnowledgeEntry] = []
+        # create/update/delete 是"文件 + 索引 + 向量"三步，必须串行
+        self._lock = asyncio.Lock()
 
     async def init(self) -> None:
         """创建目录，获取 ChromaDB collection。"""
@@ -111,7 +146,7 @@ class KnowledgeBaseManager:
             logger.info(f"[KB] Dangling vector removed: {kid}")
 
         if changed:
-            self._save_index(index)
+            await self._save_index(index)
             self._index = index
             logger.info(
                 f"[KB] validate_on_startup repairs: {len(existing_files)} files, "
@@ -185,6 +220,7 @@ class KnowledgeBaseManager:
             "range_end": e,
         }
 
+    @_locked
     async def create(self, title: str, summary: str, body: str) -> str:
         """创建新知识条目。返回 kid。
 
@@ -200,11 +236,12 @@ class KnowledgeBaseManager:
         entry = self._make_entry(kid, title, summary, total_lines, len(body))
         self._write_knowledge_file(self._get_knowledge_path(kid), title, summary, body)
         self._index.append(entry)
-        self._save_index(self._index)
+        await self._save_index(self._index)
         await self._sync_to_vector(kid, summary)
         logger.info(f"[KB] Created: {kid} '{title}' ({len(body)} chars)")
         return kid
 
+    @_locked
     async def update(
         self,
         kid: str,
@@ -241,7 +278,7 @@ class KnowledgeBaseManager:
         entry["total_lines"] = total_lines
         entry["char_count"] = len(new_body)
         entry["updated_at"] = datetime.now(timezone.utc).isoformat()
-        self._save_index(self._index)
+        await self._save_index(self._index)
 
         if summary is not None:
             await self._sync_to_vector(kid, new_summary)
@@ -249,6 +286,7 @@ class KnowledgeBaseManager:
         logger.info(f"[KB] Updated: {kid} '{new_title}'")
         return "ok"
 
+    @_locked
     async def delete(self, kid: str) -> str:
         """删除知识条目（文件 + 索引 + 向量）。返回 "ok" 或错误消息。"""
         entry = self._find_entry(kid)
@@ -262,7 +300,7 @@ class KnowledgeBaseManager:
             logger.warning(f"[KB] Failed to delete file {path}: {e}")
 
         self._index = [e for e in self._index if e["kid"] != kid]
-        self._save_index(self._index)
+        await self._save_index(self._index)
         await self._remove_from_vector(kid)
         logger.info(f"[KB] Deleted: {kid}")
         return "ok"
@@ -364,8 +402,7 @@ class KnowledgeBaseManager:
     def _write_knowledge_file(path: Path, title: str, summary: str, body: str) -> None:
         """写入标准格式的知识文件。"""
         content = f"# {title}\n{summary}\n---\n{body}"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(content, encoding="utf-8")
+        _atomic_write_text(path, content)
 
     def _load_index(self) -> list[KnowledgeEntry]:
         if not self._index_path.exists():
@@ -376,11 +413,9 @@ class KnowledgeBaseManager:
             logger.warning(f"[KB] Corrupt index, resetting: {e}")
             return []
 
-    def _save_index(self, index: list[KnowledgeEntry]) -> None:
-        self._index_path.parent.mkdir(parents=True, exist_ok=True)
-        self._index_path.write_text(
-            json.dumps(index, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
+    async def _save_index(self, index: list[KnowledgeEntry]) -> None:
+        text = json.dumps(index, ensure_ascii=False, indent=2)
+        await asyncio.to_thread(_atomic_write_text, self._index_path, text)
 
     @staticmethod
     def _make_entry(

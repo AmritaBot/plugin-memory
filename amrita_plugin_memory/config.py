@@ -91,14 +91,45 @@ class SubconsciousConfig(BaseModel):
     )
 
 
+class DecayConfig(BaseModel):
+    """时间记忆退化配置：软衰减（检索重排）+ 硬分层（降级 / 清理）。"""
+
+    enabled: bool = Field(default=True, description="是否启用时间记忆退化")
+    short_term_days: int = Field(
+        default=7, ge=1, description="短期记忆保留天数（low 层寿命）"
+    )
+    long_term_days: int = Field(
+        default=90, ge=1, description="长期记忆保留天数（high 层寿命）"
+    )
+    half_life_days: float = Field(
+        default=30.0, ge=1.0, description="软衰减基础半衰期（天），low 为基准"
+    )
+    importance_boost: float = Field(
+        default=1.0,
+        ge=0.0,
+        le=5.0,
+        description="importance 对半衰期的放大系数，high 为 (1+2*boost) 倍",
+    )
+    overfetch: int = Field(
+        default=3, ge=1, le=10, description="软衰减检索的候选放大倍数"
+    )
+    score_floor: float = Field(
+        default=0.05, ge=0.0, le=1.0, description="衰减因子下限，避免旧记忆权重归零"
+    )
+    sweep_enabled: bool = Field(default=True, description="是否启用分层清理")
+    sweep_interval_hours: int = Field(
+        default=24, ge=1, description="分层清理周期（小时）"
+    )
+    sweep_batch_limit: int = Field(
+        default=5000, ge=100, description="单次清理最多扫描的记忆条数"
+    )
+
+
 class ConfigFile(BaseModel):
     """配置文件"""
 
-    short_term_expiry_days: int = Field(
-        default=7, description="短期记忆的过期天数，默认为7天"
-    )
-    long_term_expiry_days: int = Field(
-        default=90, description="长期记忆的过期天数，默认为90天"
+    decay: DecayConfig = Field(
+        default_factory=DecayConfig, description="时间记忆退化配置"
     )
     per_session_memory_limit: int = Field(
         default=100, description="每个会话的记忆数量限制，默认为50条"

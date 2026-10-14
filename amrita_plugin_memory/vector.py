@@ -7,7 +7,7 @@ from collections.abc import Awaitable, Callable, Sequence
 from datetime import datetime
 from functools import wraps
 from inspect import iscoroutinefunction
-from typing import Any, Literal, TypeVar, overload
+from typing import Any, Literal, TypeVar, cast, overload
 from uuid import UUID
 
 import aiologic
@@ -33,7 +33,8 @@ from nonebot import get_driver, logger
 from pydantic import BaseModel, Field
 from pytz import utc
 
-from .config import VECTOR_DB_PATH, build_preset, env_config
+from .config import VECTOR_DB_PATH, DataManager, DecayConfig, build_preset, env_config
+from .decay import plan_action, rerank_query_result
 
 T = TypeVar("T")
 
@@ -404,29 +405,62 @@ class AsyncUserMemory:
         importance: Literal["low", "medium", "high"] | None = None,
         top_k: int = 5,
         include: chromadb.Include = ["metadatas", "documents", "distances"],
+        decay: DecayConfig | None = None,
     ) -> chromadb.QueryResult:
+        policy = decay or (await DataManager().safe_get_config()).decay
+        where = {
+            "user_id": user_id,
+            **({"importance": importance} if importance else {}),
+        }
         async with get_lock(self._collection_name, user_id):
             query_vector = await call_embedding([query_text], build_preset())
             assert len(query_vector) == 1, "Invalid embedding vector length"
-            return await any_to_thread(
+            # 软衰减要靠距离和元数据重排，缺了就补上
+            fetch_include: list[str] = list(include)
+            if policy.enabled:
+                for key in ("metadatas", "distances"):
+                    if key not in fetch_include:
+                        fetch_include.append(key)
+            fetch_k = max(top_k, 1)
+            if policy.enabled and policy.overfetch > 1:
+                # 直接按 overfetch 放大候选，不再全量取 id 数条数：
+                # n_results 超过实际条数时 chroma 自己会截断
+                fetch_k = max(top_k * policy.overfetch, top_k)
+            result = await any_to_thread(
                 self._collection.query,
                 query_vector[0].embedding,
-                [
-                    query_text,
-                ],
-                include=include,
-                n_results=top_k,
-                where={
-                    "user_id": user_id,
-                    **({"importance": importance} if importance else {}),
-                },
+                [query_text],
+                include=fetch_include,
+                n_results=fetch_k,
+                where=where,
             )
+            if not policy.enabled:
+                return result
+            reranked = rerank_query_result(
+                result,
+                top_k,
+                policy.half_life_days,
+                policy.importance_boost,
+                policy.score_floor,
+            )
+            # 调用方没要的字段不外泄
+            for key in ("metadatas", "distances"):
+                if key not in include:
+                    reranked.pop(key, None)
+            return cast(chromadb.QueryResult, reranked)
 
     @require_init
     async def get_all_notes(
-        self, user_id: str, include: chromadb.Include = ["metadatas", "documents"]
+        self,
+        user_id: str,
+        include: chromadb.Include = ["metadatas", "documents"],
+        ids: list[str] | None = None,
     ) -> chromadb.GetResult:
         async with get_lock(self._collection_name, user_id):
+            if ids is not None:
+                return await any_to_thread(
+                    self._collection.get, include=include, ids=ids
+                )
             return await any_to_thread(
                 self._collection.get,
                 include=include,
@@ -457,3 +491,88 @@ class AsyncUserMemory:
                 self._collection.get, where={"user_id": user_id}, include=[]
             )
             return len(result["ids"])
+
+    @require_init
+    async def sweep_decay(self, policy: DecayConfig) -> dict[str, int]:
+        """扫描记忆库：超龄先降级，降到 low 仍超龄则清理。
+
+        分两趟：先只读分页扫描，把候选按分区归组；再逐分区持锁复核并应用。
+        只读扫描避免边扫边删导致 offset 漂移，锁内复核避免覆盖并发编辑。
+        """
+        now = datetime.now(utc)
+        scan_limit = policy.sweep_batch_limit
+        page_size = max(1, min(1000, scan_limit))
+        offset = 0
+        scanned = 0
+        candidates: defaultdict[str, list[str]] = defaultdict(list)
+
+        while scanned < scan_limit:
+            page = await any_to_thread(
+                self._collection.get,
+                include=["metadatas"],
+                limit=min(page_size, scan_limit - scanned),
+                offset=offset,
+            )
+            ids = page.get("ids") or []
+            if not ids:
+                break
+            metas = page.get("metadatas") or []
+            for i, doc_id in enumerate(ids):
+                meta = (
+                    dict(metas[i])
+                    if i < len(metas) and isinstance(metas[i], dict)
+                    else {}
+                )
+                action, _ = plan_action(
+                    meta, now, policy.short_term_days, policy.long_term_days
+                )
+                if action != "keep":
+                    candidates[str(meta.get("user_id", ""))].append(doc_id)
+            scanned += len(ids)
+            offset += len(ids)
+
+        demoted = 0
+        purged = 0
+        for user_id, doc_ids in candidates.items():
+            async with get_lock(self._collection_name, user_id):
+                # 扫描到应用之间可能已被编辑或删除，锁内重新读一遍再决策
+                fresh = await any_to_thread(
+                    self._collection.get, ids=doc_ids, include=["metadatas"]
+                )
+                fresh_ids = fresh.get("ids") or []
+                fresh_metas = fresh.get("metadatas") or []
+                demote_ids: list[str] = []
+                demote_metas: list[dict] = []
+                purge_ids: list[str] = []
+                for i, doc_id in enumerate(fresh_ids):
+                    meta = (
+                        dict(fresh_metas[i])
+                        if i < len(fresh_metas) and isinstance(fresh_metas[i], dict)
+                        else {}
+                    )
+                    action, new_importance = plan_action(
+                        meta, now, policy.short_term_days, policy.long_term_days
+                    )
+                    if action == "demote" and new_importance:
+                        meta["importance"] = new_importance
+                        demote_ids.append(doc_id)
+                        demote_metas.append(meta)
+                    elif action == "purge":
+                        purge_ids.append(doc_id)
+                if demote_ids:
+                    await any_to_thread(
+                        self._collection.update,
+                        ids=demote_ids,
+                        metadatas=demote_metas,
+                    )
+                if purge_ids:
+                    await any_to_thread(self._collection.delete, ids=purge_ids)
+                demoted += len(demote_ids)
+                purged += len(purge_ids)
+
+        return {
+            "scanned": scanned,
+            "demoted": demoted,
+            "purged": purged,
+            "kept": max(scanned - demoted - purged, 0),
+        }
