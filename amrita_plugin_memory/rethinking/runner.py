@@ -233,7 +233,7 @@ class SubconsciousRunner:
     async def _post_process(self, chat_obj: ChatObject) -> None:
         """本轮结束后：提取摘要、更新全局 usage、持久化、调度下次运行。"""
         # 1. 更新全局 usage（复用 Bot 的 InsightsModel 统计）
-        await self._update_global_usage(chat_obj)
+        await self._update_usage(chat_obj)
 
         # 2. 提取压缩节点产出的摘要
         mem = chat_obj._di_memory.memory
@@ -271,9 +271,8 @@ class SubconsciousRunner:
                 f"penalty NOT reset (penalty={_state.get_penalty_count()})"
             )
 
-    @staticmethod
-    async def _update_global_usage(chat_obj: ChatObject) -> None:
-        """更新全局 InsightsModel usage，复用 Bot 的 add_usage 逻辑。
+    async def _update_usage(self, chat_obj: ChatObject) -> None:
+        """更新全局 InsightsModel 与目标用户的 usage，复用 Bot 的 add_usage 逻辑。
 
         chat_obj._di_resp.response 是 LLM 最终返回的 UniResponse，
         chat_obj._di_resp.extra_usage 是压缩等组件累积的额外 token。
@@ -295,8 +294,26 @@ class SubconsciousRunner:
                 f"(input={usage.prompt_tokens}, output={usage.completion_tokens}, "
                 f"count={insights.usage_count})"
             )
+            await self._add_user_usage(usage)
         except Exception as e:
-            logger.warning(f"[Subconscious] Update global usage failed: {e}")
+            logger.warning(f"[Subconscious] Update usage failed: {e}")
+
+    async def _add_user_usage(self, usage: UniResponseUsage[int]) -> None:
+        """把本轮 token 记到目标用户的元数据，与用户自己聊天的统计同一口径。"""
+        uid = self._config.target_user_id
+        if not uid:
+            return
+        try:
+            repo = CachedUserDataRepository()
+            meta = await repo.get_metadata(make_scope_id(uid, is_group=False))
+            add_usage(meta, usage)
+            await repo.update_metadata(meta)
+            logger.debug(
+                f"[Subconscious] User usage updated (uid={uid}, "
+                f"input={usage.prompt_tokens}, output={usage.completion_tokens})"
+            )
+        except Exception as e:
+            logger.warning(f"[Subconscious] Update user usage failed: {e}")
 
     @staticmethod
     async def _read_state_payload(uid: str) -> dict[str, Any]:

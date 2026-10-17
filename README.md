@@ -459,7 +459,7 @@ flowchart TD
 /memory group search <关键词> — 搜索群共享记忆
 /memory group delete <ID>     — 删除群共享记忆（仅管理员 / 群主）
 /memory memo                  — 以合并转发查看当前作用域备忘录
-/memory dmn                   — 立即触发一轮潜意识调度（仅超级用户）
+/memory dmn                   — 立即触发一轮潜意识调度（仅超级用户，需 subconscious.enabled=true 且已配置 target_user_id）
 ```
 
 兼容旧格式 `/memory list` 等（默认以个人范围执行）。
