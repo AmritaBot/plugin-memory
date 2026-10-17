@@ -402,7 +402,9 @@ flowchart TD
 | `read_memory`       | query, top_k(5), importance?, scope(enum)     |
 | `update_memory`     | id, scope, content?, tags?, importance?       |
 | `delete_memory`     | id, scope                                     |
-| `list_memory`       | limit, scope                                  |
+| `list_memory`       | limit(10, 上限50), offset, scope              |
+| `read_memo`         | —（读取当前作用域备忘录全文）                 |
+| `append_memo`       | content（在备忘录末尾追加一段）               |
 | `update_memo`       | content（L1 备忘录整篇替换）                  |
 | `knowledge_list`    | —                                             |
 | `knowledge_read`    | kid, start_line?, end_line?                   |
@@ -450,12 +452,14 @@ flowchart TD
 ### 用户命令 `/memory`
 
 ```text
-/memory user list             — 列出个人记忆
+/memory user list [页码]      — 分页列出个人记忆（每页10条）
 /memory user search <关键词>  — 搜索个人记忆
 /memory user delete <ID>      — 删除个人记忆
-/memory group list            — 列出群共享记忆
+/memory group list [页码]     — 分页列出群共享记忆
 /memory group search <关键词> — 搜索群共享记忆
 /memory group delete <ID>     — 删除群共享记忆（仅管理员 / 群主）
+/memory memo                  — 以合并转发查看当前作用域备忘录
+/memory dmn                   — 立即触发一轮潜意识调度（仅超级用户，需 subconscious.enabled=true 且已配置 target_user_id）
 ```
 
 兼容旧格式 `/memory list` 等（默认以个人范围执行）。
