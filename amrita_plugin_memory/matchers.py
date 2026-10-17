@@ -1,8 +1,15 @@
 """NoneBot2 命令：/memory"""
 
+from amrita.plugins.chat.utils.functions import split_message_into_chats
 from amrita.plugins.menu.models import MatcherData
+from amrita.utils.send import send_forward_msg
 from nonebot import get_bot, get_driver, logger, on_command
-from nonebot.adapters.onebot.v11 import GroupMessageEvent, Message, MessageEvent
+from nonebot.adapters.onebot.v11 import (
+    GroupMessageEvent,
+    Message,
+    MessageEvent,
+    MessageSegment,
+)
 from nonebot.exception import FinishedException
 from nonebot.matcher import Matcher
 from nonebot.params import CommandArg
@@ -127,42 +134,48 @@ async def _trigger_dmn(event: MessageEvent) -> str:
     return "已触发，潜意识将在后台跑一轮"
 
 
-MEMO_PAGE_CHARS = 600
+MEMO_SEGMENT_CHARS = 600
+
+
+def _pack_memo_nodes(content: str) -> list[str]:
+    """按行装箱成转发节点，单行过长时再按句切，不从句子中间断开。"""
+    units: list[str] = []
+    for line in content.splitlines(keepends=True):
+        if len(line) <= MEMO_SEGMENT_CHARS:
+            units.append(line)
+        else:
+            units.extend(split_message_into_chats(line, max_length=MEMO_SEGMENT_CHARS))
+    nodes: list[str] = []
+    buf = ""
+    for unit in units:
+        if buf and len(buf) + len(unit) > MEMO_SEGMENT_CHARS:
+            nodes.append(buf)
+            buf = unit
+        else:
+            buf += unit
+    if buf:
+        nodes.append(buf)
+    packed = [n.rstrip("\n") for n in nodes if n.strip()]
+    return packed or [content]
 
 
 async def _send_memo_forward(
     matcher: Matcher, event: MessageEvent, content: str
 ) -> None:
-    """把备忘录按段拆成合并转发节点，失败则退回纯文本。"""
-    chunks = [
-        content[i : i + MEMO_PAGE_CHARS]
-        for i in range(0, len(content), MEMO_PAGE_CHARS)
-    ] or [""]
-    self_id = str(event.self_id)
-    nodes = [
-        {
-            "type": "node",
-            "data": {
-                "name": "备忘录",
-                "uin": self_id,
-                "content": f"第 {i + 1}/{len(chunks)} 段\n{chunk}",
-            },
-        }
-        for i, chunk in enumerate(chunks)
-    ]
+    """以合并转发发送备忘录，沿用 Amrita 的 send_forward_msg。"""
+    nodes = _pack_memo_nodes(content)
     try:
-        bot = get_bot(self_id)
-        if isinstance(event, GroupMessageEvent):
-            await bot.call_api(
-                "send_group_forward_msg", group_id=event.group_id, messages=nodes
-            )
-        else:
-            await bot.call_api(
-                "send_private_forward_msg", user_id=event.user_id, messages=nodes
-            )
+        await send_forward_msg(
+            get_bot(str(event.self_id)),
+            event,
+            "备忘录",
+            uin=str(event.self_id),
+            msgs=[MessageSegment.text(i) for i in nodes],
+        )
     except Exception as e:
         logger.warning(f"[Memo] forward failed, fallback to text: {e}")
-        await matcher.send(content)
+        for node in nodes:
+            await matcher.send(node)
 
 
 async def _handle_list(
