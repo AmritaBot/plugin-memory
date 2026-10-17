@@ -16,8 +16,8 @@ memory_cmd = on_command(
     aliases={"记忆"},
     state=MatcherData(
         name="记忆管理",
-        description="查看/搜索/删除长期记忆",
-        usage="/memory (list|search|delete) [参数]",
+        description="查看/搜索/删除长期记忆，回看备忘录，手动触发潜意识调度",
+        usage="/memory (list|search|delete|memo|dmn) [参数]",
     ).model_dump(),
 )
 
