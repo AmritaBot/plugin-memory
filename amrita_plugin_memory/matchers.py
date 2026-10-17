@@ -1,13 +1,14 @@
 """NoneBot2 命令：/memory"""
 
 from amrita.plugins.menu.models import MatcherData
-from nonebot import on_command
+from nonebot import get_bot, get_driver, logger, on_command
 from nonebot.adapters.onebot.v11 import GroupMessageEvent, Message, MessageEvent
 from nonebot.exception import FinishedException
 from nonebot.matcher import Matcher
 from nonebot.params import CommandArg
 
 from .keys import make_scope_id
+from .memo import get_memo
 from .vector import AsyncUserMemory, get_db_conn
 
 memory_cmd = on_command(
@@ -34,6 +35,21 @@ async def _(
     args_list = args.extract_plain_text().strip().split(maxsplit=1)
     sub = args_list[0].lower() if args_list else ""
     rest = args_list[1] if len(args_list) > 1 else ""
+
+    if sub in ("memo", "备忘录"):
+        uni_id = (
+            make_scope_id(event.group_id, is_group=True)
+            if isinstance(event, GroupMessageEvent)
+            else make_scope_id(event.user_id, is_group=False)
+        )
+        content = await get_memo(uni_id)
+        if not content:
+            await matcher.finish("当前作用域还没有备忘录")
+        await _send_memo_forward(matcher, event, content)
+        await matcher.finish()
+
+    if sub in ("dmn", "run", "触发"):
+        await matcher.finish(await _trigger_dmn(event))
 
     ope = AsyncUserMemory(get_db_conn())
     await ope.init()
@@ -68,7 +84,7 @@ async def _(
     pid = partitions.get(scope) if scope else None
 
     if scope and pid and action in ("", "list"):
-        await _handle_list(matcher, ope, pid, scope)
+        await _handle_list(matcher, ope, pid, scope, action_args)
     elif scope and pid and action == "search":
         await _handle_search(matcher, ope, pid, scope, action_args)
     elif scope and pid and action == "delete":
@@ -90,24 +106,86 @@ async def _(
         await matcher.finish(hint)
 
 
+async def _trigger_dmn(event: MessageEvent) -> str:
+    """手动触发潜意识调度，返回给用户的提示文案。"""
+    if str(event.get_user_id()) not in get_driver().config.superusers:
+        return "仅超级用户可手动触发潜意识调度"
+    from .rethinking import _state
+
+    runner = _state.get_runner()
+    if runner is None:
+        return "潜意识调度未启动：检查 enabled 与 target_user_id"
+    await runner.trigger_now()
+    return "已触发，潜意识将在后台跑一轮"
+
+
+MEMO_PAGE_CHARS = 600
+
+
+async def _send_memo_forward(
+    matcher: Matcher, event: MessageEvent, content: str
+) -> None:
+    """把备忘录按段拆成合并转发节点，失败则退回纯文本。"""
+    chunks = [
+        content[i : i + MEMO_PAGE_CHARS]
+        for i in range(0, len(content), MEMO_PAGE_CHARS)
+    ] or [""]
+    self_id = str(event.self_id)
+    nodes = [
+        {
+            "type": "node",
+            "data": {
+                "name": "备忘录",
+                "uin": self_id,
+                "content": f"第 {i + 1}/{len(chunks)} 段\n{chunk}",
+            },
+        }
+        for i, chunk in enumerate(chunks)
+    ]
+    try:
+        bot = get_bot(self_id)
+        if isinstance(event, GroupMessageEvent):
+            await bot.call_api(
+                "send_group_forward_msg", group_id=event.group_id, messages=nodes
+            )
+        else:
+            await bot.call_api(
+                "send_private_forward_msg", user_id=event.user_id, messages=nodes
+            )
+    except Exception as e:
+        logger.warning(f"[Memo] forward failed, fallback to text: {e}")
+        await matcher.send(content)
+
+
 async def _handle_list(
     matcher: Matcher,
     ope: AsyncUserMemory,
     partition_id: str,
     scope: str,
+    arg: str = "",
 ):
     try:
-        result = await ope.get_all_notes(
-            partition_id, include=["metadatas", "documents"]
-        )
-        if not result or not result.get("ids"):
+        size = 10
+        page = int(arg.strip()) if arg.strip().isdigit() else 1
+        page = max(1, page)
+        total = await ope.count_user_notes(partition_id)
+        if total == 0:
             await matcher.finish(f"{_label(scope)} 暂无记忆")
 
-        ids = result["ids"]
+        pages = (total + size - 1) // size
+        page = min(page, pages)
+        offset = (page - 1) * size
+        result = await ope.get_all_notes(
+            partition_id,
+            include=["metadatas", "documents"],
+            limit=size,
+            offset=offset,
+        )
+        ids = result.get("ids") or []
         documents = result.get("documents") or [""] * len(ids)
         metadatas = result.get("metadatas") or [{}] * len(ids)
 
-        lines = [f"📋 {_label(scope)} 记忆列表（共 {len(ids)} 条）:"]
+        lines = [f"📋 {_label(scope)} 记忆列表（第 {page}/{pages} 页，共 {total} 条）:"]
         for i, doc_id in enumerate(ids):
             meta = metadatas[i] if i < len(metadatas) else {}
             doc = documents[i] if i < len(documents) else ""
@@ -116,6 +194,8 @@ async def _handle_list(
                 f"[{meta.get('importance', '-')}] [{doc_id}] "
                 f"{preview} | tag: {meta.get('tags', '-')}"
             )
+        if page < pages:
+            lines.append(f"下一页: /memory {scope} list {page + 1}")
 
         await matcher.finish("\n".join(lines))
     except FinishedException:

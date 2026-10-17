@@ -455,17 +455,20 @@ class AsyncUserMemory:
         user_id: str,
         include: chromadb.Include = ["metadatas", "documents"],
         ids: list[str] | None = None,
+        limit: int | None = None,
+        offset: int | None = None,
     ) -> chromadb.GetResult:
         async with get_lock(self._collection_name, user_id):
             if ids is not None:
                 return await any_to_thread(
                     self._collection.get, include=include, ids=ids
                 )
-            return await any_to_thread(
-                self._collection.get,
-                include=include,
-                where={"user_id": user_id},
-            )
+            kwargs: dict = {"include": include, "where": {"user_id": user_id}}
+            if limit is not None:
+                kwargs["limit"] = limit
+            if offset is not None:
+                kwargs["offset"] = offset
+            return await any_to_thread(self._collection.get, **kwargs)
 
     @require_init
     async def delete_note(self, user_id: str, doc_id: str):

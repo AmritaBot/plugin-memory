@@ -69,6 +69,7 @@ class SubconsciousRunner:
         self._config = config
         self._job_id = f"subconscious_{config.target_user_id}"
         self._is_running = False
+        self._manual_task: asyncio.Task | None = None
         self._last_abstracts: list[str] = []
         self._total_runs = 0
         self._prompt_dir = DATA_PATH.parent.parent / "config" / "amrita_plugin_memory"
@@ -119,6 +120,8 @@ class SubconsciousRunner:
     def stop(self) -> None:
         with contextlib.suppress(Exception):
             scheduler.remove_job(self._job_id)
+        if self._manual_task is not None and not self._manual_task.done():
+            self._manual_task.cancel()
 
     async def cancel_and_reschedule(self) -> None:
         """取消当前计划，递增惩罚计数器，重新计算延迟并调度一次运行。
@@ -153,6 +156,15 @@ class SubconsciousRunner:
             misfire_grace_time=30,
             replace_existing=True,
         )
+
+    async def trigger_now(self) -> None:
+        """手动触发：取消待执行任务并立刻跑一轮，不阻塞调用方。"""
+        with contextlib.suppress(Exception):
+            scheduler.remove_job(self._job_id)
+        if self._manual_task is not None and not self._manual_task.done():
+            self._manual_task.cancel()
+        # 持有引用，避免任务被 GC 回收
+        self._manual_task = asyncio.create_task(self._run())
 
     async def _run(self) -> None:
         """调度入口 — 保证任何异常路径都会释放运行标志。"""
