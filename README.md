@@ -404,6 +404,7 @@ flowchart TD
 | `delete_memory`     | id, scope                                     |
 | `list_memory`       | limit(10, 上限50), offset, scope              |
 | `read_memo`         | —（读取当前作用域备忘录全文）                 |
+| `append_memo`       | content（在备忘录末尾追加一段）               |
 | `update_memo`       | content（L1 备忘录整篇替换）                  |
 | `knowledge_list`    | —                                             |
 | `knowledge_read`    | kid, start_line?, end_line?                   |

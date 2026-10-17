@@ -188,6 +188,23 @@ READ_MEMO_FUN = FunctionDefinitionSchema(
     parameters=FunctionParametersSchema(type="object", properties={}, required=[]),
 )
 
+APPEND_MEMO_FUN = FunctionDefinitionSchema(
+    name="append_memo",
+    description=(
+        "在备忘录末尾追加一段内容，不覆盖已有条目。"
+        "适合逐条补充规则或偏好；整篇重写请用 update_memo"
+    ),
+    parameters=FunctionParametersSchema(
+        type="object",
+        properties={
+            "content": FunctionPropertySchema(
+                type="string", description="要追加的文本，会与原文以换行分隔"
+            ),
+        },
+        required=["content"],
+    ),
+)
+
 UPDATE_MEMO_FUN = FunctionDefinitionSchema(
     name="update_memo",
     description=(
@@ -454,6 +471,29 @@ async def read_memo(ctx: ToolContext) -> str:
         )
         return _err(f"读取备忘录失败: {e!s}")
     return _ok(memo=content, chars=len(content), empty=not content)
+
+
+@on_tools(APPEND_MEMO_FUN, custom_run=True, strict=True)
+async def append_memo(ctx: ToolContext) -> str:
+    if err := _check_required(ctx, "append_memo", "content"):
+        return err
+    event: OB11Event = _get_event(ctx)
+    uni_id = get_uni_user_id(event)
+    addition: str = str(ctx.data["content"]).strip()
+    if not addition:
+        return _err("追加内容为空")
+    try:
+        current = await get_memo(uni_id)
+        merged = f"{current}\n{addition}" if current else addition
+        await set_memo(uni_id, merged)
+    except MemoTooLongError as e:
+        return _err(str(e))
+    except Exception as e:
+        logger.opt(exception=e, colors=True, raw=True).exception(
+            f"追加备忘录时发生错误: {e}"
+        )
+        return _err(f"追加备忘录失败: {e!s}")
+    return _ok(message="备忘录已追加", chars=len(merged), appended=len(addition))
 
 
 @on_tools(UPDATE_MEMO_FUN, custom_run=True, strict=True)
