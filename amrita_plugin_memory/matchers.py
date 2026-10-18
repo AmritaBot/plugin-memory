@@ -4,6 +4,7 @@ from typing import cast
 
 from amrita.plugins.chat.utils.functions import split_message_into_chats
 from amrita.plugins.menu.models import MatcherData
+from amrita.plugins.perm.API.admin import is_lp_admin
 from amrita.utils.send import send_forward_msg
 from nonebot import get_bot, get_driver, logger, on_command
 from nonebot.adapters.onebot.v11 import (
@@ -27,8 +28,8 @@ memory_cmd = on_command(
     aliases={"记忆"},
     state=MatcherData(
         name="记忆管理",
-        description="查看/搜索/删除长期记忆，回看备忘录，手动触发潜意识调度",
-        usage="/memory (list|search|delete|memo|dmn) [参数]",
+        description="查看/搜索/删除长期记忆，回看备忘录",
+        usage="/memory (list|search|delete|memo) [参数]",
     ).model_dump(),
 )
 
@@ -60,7 +61,10 @@ async def _(
         await matcher.finish()
 
     if sub in ("dmn", "run", "触发"):
-        await matcher.finish(await _trigger_dmn(event))
+        # 管理入口不进菜单，普通用户按未知选项处理
+        if not await _is_admin(event):
+            await matcher.finish(f"未知选项：{sub}")
+        await matcher.finish(await _trigger_dmn())
 
     ope = AsyncUserMemory(get_db_conn())
     await ope.init()
@@ -117,11 +121,18 @@ async def _(
         await matcher.finish(hint)
 
 
-async def _trigger_dmn(event: MessageEvent) -> str:
-    """手动触发潜意识调度，返回给用户的提示文案。"""
-    if str(event.get_user_id()) not in get_driver().config.superusers:
-        return "仅超级用户可手动触发潜意识调度"
+async def _is_admin(event: MessageEvent) -> bool:
+    """超级用户或持有 lp.admin 权限节点。"""
+    if str(event.get_user_id()) in get_driver().config.superusers:
+        return True
+    try:
+        return await is_lp_admin(event)
+    except Exception:
+        return False
 
+
+async def _trigger_dmn() -> str:
+    """手动触发潜意识调度，返回给用户的提示文案。调用前需已校验权限。"""
     cfg = (await DataManager().safe_get_config()).subconscious
     if not cfg.enabled:
         return "潜意识调度未启用：subconscious.enabled 为 false"
