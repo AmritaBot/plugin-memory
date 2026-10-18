@@ -69,6 +69,7 @@ class SubconsciousRunner:
         self._config = config
         self._job_id = f"subconscious_{config.target_user_id}"
         self._is_running = False
+        self._manual_task: asyncio.Task | None = None
         self._last_abstracts: list[str] = []
         self._total_runs = 0
         self._prompt_dir = DATA_PATH.parent.parent / "config" / "amrita_plugin_memory"
@@ -119,6 +120,8 @@ class SubconsciousRunner:
     def stop(self) -> None:
         with contextlib.suppress(Exception):
             scheduler.remove_job(self._job_id)
+        if self._manual_task is not None and not self._manual_task.done():
+            self._manual_task.cancel()
 
     async def cancel_and_reschedule(self) -> None:
         """取消当前计划，递增惩罚计数器，重新计算延迟并调度一次运行。
@@ -153,6 +156,15 @@ class SubconsciousRunner:
             misfire_grace_time=30,
             replace_existing=True,
         )
+
+    async def trigger_now(self) -> None:
+        """手动触发：取消待执行任务并立刻跑一轮，不阻塞调用方。"""
+        with contextlib.suppress(Exception):
+            scheduler.remove_job(self._job_id)
+        if self._manual_task is not None and not self._manual_task.done():
+            self._manual_task.cancel()
+        # 持有引用，避免任务被 GC 回收
+        self._manual_task = asyncio.create_task(self._run())
 
     async def _run(self) -> None:
         """调度入口 — 保证任何异常路径都会释放运行标志。"""
@@ -221,7 +233,7 @@ class SubconsciousRunner:
     async def _post_process(self, chat_obj: ChatObject) -> None:
         """本轮结束后：提取摘要、更新全局 usage、持久化、调度下次运行。"""
         # 1. 更新全局 usage（复用 Bot 的 InsightsModel 统计）
-        await self._update_global_usage(chat_obj)
+        await self._update_usage(chat_obj)
 
         # 2. 提取压缩节点产出的摘要
         mem = chat_obj._di_memory.memory
@@ -259,9 +271,8 @@ class SubconsciousRunner:
                 f"penalty NOT reset (penalty={_state.get_penalty_count()})"
             )
 
-    @staticmethod
-    async def _update_global_usage(chat_obj: ChatObject) -> None:
-        """更新全局 InsightsModel usage，复用 Bot 的 add_usage 逻辑。
+    async def _update_usage(self, chat_obj: ChatObject) -> None:
+        """更新全局 InsightsModel 与目标用户的 usage，复用 Bot 的 add_usage 逻辑。
 
         chat_obj._di_resp.response 是 LLM 最终返回的 UniResponse，
         chat_obj._di_resp.extra_usage 是压缩等组件累积的额外 token。
@@ -283,8 +294,26 @@ class SubconsciousRunner:
                 f"(input={usage.prompt_tokens}, output={usage.completion_tokens}, "
                 f"count={insights.usage_count})"
             )
+            await self._add_user_usage(usage)
         except Exception as e:
-            logger.warning(f"[Subconscious] Update global usage failed: {e}")
+            logger.warning(f"[Subconscious] Update usage failed: {e}")
+
+    async def _add_user_usage(self, usage: UniResponseUsage[int]) -> None:
+        """把本轮 token 记到目标用户的元数据，与用户自己聊天的统计同一口径。"""
+        uid = self._config.target_user_id
+        if not uid:
+            return
+        try:
+            repo = CachedUserDataRepository()
+            meta = await repo.get_metadata(make_scope_id(uid, is_group=False))
+            add_usage(meta, usage)
+            await repo.update_metadata(meta)
+            logger.debug(
+                f"[Subconscious] User usage updated (uid={uid}, "
+                f"input={usage.prompt_tokens}, output={usage.completion_tokens})"
+            )
+        except Exception as e:
+            logger.warning(f"[Subconscious] Update user usage failed: {e}")
 
     @staticmethod
     async def _read_state_payload(uid: str) -> dict[str, Any]:

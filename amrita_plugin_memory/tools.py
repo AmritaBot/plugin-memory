@@ -17,7 +17,7 @@ from nonebot.adapters.onebot.v11 import Event as OB11Event
 
 from .config import DataManager
 from .keys import Scope, resolve_scope_uni_id
-from .memo import MemoTooLongError, set_memo
+from .memo import MemoTooLongError, get_memo, set_memo
 from .vector import AsyncUserMemory, MemoryMetadata, get_db_conn
 
 
@@ -163,16 +163,45 @@ DELETE_FUN = FunctionDefinitionSchema(
 
 LIST_MEMORY_FUN = FunctionDefinitionSchema(
     name="list_memory",
-    description="列出当前用户(或群组)的所有记忆(返回tag+id)",
+    description="分页列出当前用户(或群组)的记忆(返回tag+id)，单页最多50条",
     parameters=FunctionParametersSchema(
         type="object",
         properties={
             "limit": FunctionPropertySchema(
-                type="integer", description="返回数量，默认5条", default=5
+                type="integer", description="每页数量，默认10条，上限50条", default=10
+            ),
+            "offset": FunctionPropertySchema(
+                type="integer", description="跳过条数，用于翻页，默认0", default=0
             ),
             "scope": _SCOPE_PROP,
         },
         required=["scope"],
+    ),
+)
+
+READ_MEMO_FUN = FunctionDefinitionSchema(
+    name="read_memo",
+    description=(
+        "读取当前作用域备忘录的完整原文与字数。"
+        "备忘录已常驻注入系统提示，仅在需要核对或回滚全文时调用"
+    ),
+    parameters=FunctionParametersSchema(type="object", properties={}, required=[]),
+)
+
+APPEND_MEMO_FUN = FunctionDefinitionSchema(
+    name="append_memo",
+    description=(
+        "在备忘录末尾追加一段内容，不覆盖已有条目。"
+        "适合逐条补充规则或偏好；整篇重写请用 update_memo"
+    ),
+    parameters=FunctionParametersSchema(
+        type="object",
+        properties={
+            "content": FunctionPropertySchema(
+                type="string", description="要追加的文本，会与原文以换行分隔"
+            ),
+        },
+        required=["content"],
     ),
 )
 
@@ -383,22 +412,24 @@ async def list_memory(ctx: ToolContext) -> str:
     logger.debug(f"scope={scope}, partition_id={partition_id}")
 
     try:
-        limit = ctx.data.get("limit", 5)
+        limit = max(1, min(int(ctx.data.get("limit", 10)), 50))
+        offset = max(0, int(ctx.data.get("offset", 0)))
+        total = await ope.count_user_notes(partition_id)
+        if total == 0:
+            return _ok(memories=[], total=0, offset=offset, limit=limit)
+
         result = await ope.get_all_notes(
-            partition_id, include=["metadatas", "documents"]
+            partition_id,
+            include=["metadatas", "documents"],
+            limit=limit,
+            offset=offset,
         )
-
-        if not result or not result.get("ids"):
-            return _ok(memories=[], total=0)
-
-        memories = []
-        ids = result["ids"]
+        ids = result.get("ids") or []
         documents = result.get("documents") or [""] * len(ids)
         metadatas = result.get("metadatas") or [{}] * len(ids)
 
+        memories = []
         for i, doc_id in enumerate(ids):
-            if i >= limit:
-                break
             meta = metadatas[i] if i < len(metadatas) else {}
             doc = documents[i] if i < len(documents) else ""
 
@@ -412,12 +443,57 @@ async def list_memory(ctx: ToolContext) -> str:
                 }
             )
 
-        return _ok(memories=memories, total=len(ids))
+        next_offset = offset + len(ids)
+        return _ok(
+            memories=memories,
+            total=total,
+            offset=offset,
+            limit=limit,
+            has_more=next_offset < total,
+            next_offset=next_offset if next_offset < total else None,
+        )
     except Exception as e:
         logger.opt(exception=e, colors=True, raw=True).exception(
             f"列出记忆时发生错误: {e}"
         )
         return _err(f"列出记忆失败: {e!s}")
+
+
+@on_tools(READ_MEMO_FUN, custom_run=True, strict=True)
+async def read_memo(ctx: ToolContext) -> str:
+    event: OB11Event = _get_event(ctx)
+    uni_id = get_uni_user_id(event)
+    try:
+        content = await get_memo(uni_id)
+    except Exception as e:
+        logger.opt(exception=e, colors=True, raw=True).exception(
+            f"读取备忘录时发生错误: {e}"
+        )
+        return _err(f"读取备忘录失败: {e!s}")
+    return _ok(memo=content, chars=len(content), empty=not content)
+
+
+@on_tools(APPEND_MEMO_FUN, custom_run=True, strict=True)
+async def append_memo(ctx: ToolContext) -> str:
+    if err := _check_required(ctx, "append_memo", "content"):
+        return err
+    event: OB11Event = _get_event(ctx)
+    uni_id = get_uni_user_id(event)
+    addition: str = str(ctx.data["content"]).strip()
+    if not addition:
+        return _err("追加内容为空")
+    try:
+        current = await get_memo(uni_id)
+        merged = f"{current}\n{addition}" if current else addition
+        await set_memo(uni_id, merged)
+    except MemoTooLongError as e:
+        return _err(str(e))
+    except Exception as e:
+        logger.opt(exception=e, colors=True, raw=True).exception(
+            f"追加备忘录时发生错误: {e}"
+        )
+        return _err(f"追加备忘录失败: {e!s}")
+    return _ok(message="备忘录已追加", chars=len(merged), appended=len(addition))
 
 
 @on_tools(UPDATE_MEMO_FUN, custom_run=True, strict=True)
