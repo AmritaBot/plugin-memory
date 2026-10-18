@@ -1,4 +1,5 @@
 from nonebot import get_driver, require
+from nonebot.plugin import PluginMetadata
 
 require("nonebot_plugin_localstore")
 require("nonebot_plugin_apscheduler")
@@ -6,6 +7,16 @@ require("nonebot_plugin_amrita")
 require("nonebot_plugin_orm")
 require("amrita.plugins.chat")
 require("amrita.plugins.menu")
+
+__plugin_meta__ = PluginMetadata(
+    name="Amrita长期记忆",
+    description="长期记忆、备忘录与潜意识调度",
+    usage="/memory (list|search|delete|memo|dmn) [参数]",
+    homepage="https://github.com/AmritaBot/plugin-memory",
+    type="application",
+    supported_adapters={"~onebot.v11"},
+)
+
 from . import (
     config,
     embed,
