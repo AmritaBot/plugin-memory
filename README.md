@@ -459,8 +459,10 @@ flowchart TD
 /memory group search <关键词> — 搜索群共享记忆
 /memory group delete <ID>     — 删除群共享记忆（仅管理员 / 群主）
 /memory memo                  — 以合并转发查看当前作用域备忘录
-/memory dmn                   — 立即触发一轮潜意识调度（仅超级用户，需 subconscious.enabled=true 且已配置 target_user_id）
+/memory dmn                   — 立即触发一轮潜意识调度（仅管理员，需 subconscious.enabled=true 且已配置 target_user_id）
 ```
+
+`dmn`（别名 `run`、`触发`）属于隐藏选项：不出现在菜单与用法提示中，非管理员调用会按未知选项处理。鉴权顺序为超级用户白名单，其次 `lp.admin` 权限节点。
 
 兼容旧格式 `/memory list` 等（默认以个人范围执行）。
 
