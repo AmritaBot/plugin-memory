@@ -1,10 +1,13 @@
 """NoneBot2 命令：/memory"""
 
+from typing import cast
+
 from amrita.plugins.chat.utils.functions import split_message_into_chats
 from amrita.plugins.menu.models import MatcherData
 from amrita.utils.send import send_forward_msg
 from nonebot import get_bot, get_driver, logger, on_command
 from nonebot.adapters.onebot.v11 import (
+    Bot,
     GroupMessageEvent,
     Message,
     MessageEvent,
@@ -166,7 +169,7 @@ async def _send_memo_forward(
     nodes = _pack_memo_nodes(content)
     try:
         await send_forward_msg(
-            get_bot(str(event.self_id)),
+            cast(Bot, get_bot(str(event.self_id))),
             event,
             "备忘录",
             uin=str(event.self_id),
