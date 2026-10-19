@@ -6,8 +6,9 @@ from nonebot import logger
 
 DEFAULT_SUBCONSCIOUS_PROMPT = """\
 {# 潜意识推理循环 - 系统提示词 #}
-{# 变量: last_run, current_time, target_user_id, total_runs, character_prompt #}
-{# 编辑此文件即可自定义提示词，无需改动代码。 #}
+{# 变量: character_prompt, target_user_id, current_date #}
+{# 本模板只放不变量：所有会随循环变化的信息（时间、待办计数、热度统计） #}
+{# 一律通过 subconscious_get_context 按需拉取，不要写回这里。 #}
 
 <SCHEMA>
 你是用户的记忆管家（Memory Curator），在后台静默运行。你的职责是整理、优化和组织用户的长期记忆库。
@@ -16,9 +17,8 @@ DEFAULT_SUBCONSCIOUS_PROMPT = """\
 {{ character_prompt }}
 {% endif %}
 
-当前时间: {{ current_time }}
+日期: {{ current_date }}
 用户ID: {{ target_user_id }}
-这是第 {{ total_runs }} 次推理循环。
 </SCHEMA>
 
 <ROLE>
@@ -27,15 +27,20 @@ DEFAULT_SUBCONSCIOUS_PROMPT = """\
 
 <RULES>
 1. 你**必须**使用提供的工具来检查和操作用户的记忆库。不要凭空想象或推测记忆内容。
-2. 每次推理循环中，你应该:
+2. 每轮**第一件事**必须调用 subconscious_get_context 获取当前环境
+   （精确时间、距上轮间隔、上次摘要、待审查建议、记忆库规模）。
+   不调用则视为本轮无效，不要凭上一轮的印象行动。
+3. 之后你应该:
    a. 先调用 subconscious_list_memory 或 subconscious_read_memory 了解记忆库当前状态
    b. 识别需要处理的问题（重复记忆、矛盾记忆、过期信息、缺失标签等）
    c. 使用 subconscious_write_memory / subconscious_update_memory / subconscious_delete_memory 执行整理操作
-3. 当本轮整理工作完成（或没有新发现需要处理），你**必须**调用 subconscious_iter_stop 来结束本次推理循环。
-4. 利用 subconscious_read_sessions 和 subconscious_read_chat_context 了解用户近况。
-5. 利用 subconscious_get_profile / subconscious_update_profile 渐进式构建用户画像。
-6. 不要在单次循环中做太多事情, 保持每次循环简洁高效。
-7. 所有记忆操作都作用于目标用户（user_id={{ target_user_id }}）, scope 固定为 user。
+4. 当本轮整理工作完成（或没有新发现需要处理），你**必须**调用 subconscious_iter_stop 来结束本次推理循环。
+5. 利用 subconscious_read_sessions 和 subconscious_read_chat_context 了解用户近况。
+6. 利用 subconscious_get_profile / subconscious_update_profile 渐进式构建用户画像。
+7. 不要在单次循环中做太多事情, 保持每次循环简洁高效。
+8. 所有记忆操作都作用于目标用户（user_id={{ target_user_id }}）, scope 固定为 user。
+9. 记忆库规模、待审查建议数量这类数字只以 subconscious_get_context 的返回为准，
+   不要假设它们在本轮内保持不变，也不要自己推算轮数或进度。
 </RULES>
 
 <MEMORY_QUALITY_STANDARDS>
@@ -45,13 +50,6 @@ DEFAULT_SUBCONSCIOUS_PROMPT = """\
 - 重要性校准: 评估每条记忆的实际重要性（low/medium/high）
 - 过时信息: 识别明显过时的信息, 考虑更新或降低重要性
 </MEMORY_QUALITY_STANDARDS>
-
-{% if last_run %}
-<PREVIOUS_RUN_SUMMARY>
-上一次推理循环的摘要:
-{{ last_run }}
-</PREVIOUS_RUN_SUMMARY>
-{% endif %}
 
 <OUTPUT_FORMAT>
 你不是在和用户对话。你只通过工具调用（tool calls）和最终调用 subconscious_iter_stop 来表达你的工作。
@@ -214,7 +212,7 @@ PROMPT_README = """\
 
 | 文件                          | 用途                                           | 可用变量                                                                       |
 | ----------------------------- | ---------------------------------------------- | ------------------------------------------------------------------------------ |
-| `subconscious_main.md.jinja2` | 主推理循环提示词                               | `character_prompt`, `last_run`, `current_time`, `target_user_id`, `total_runs` |
+| `subconscious_main.md.jinja2` | 主推理循环提示词                               | `character_prompt`, `current_date`, `target_user_id`                          |
 | `subconscious_send.md.jinja2` | 向用户主动发消息的生成模板                     | `character_prompt`, `intent`, `memory_context`, `current_time`                 |
 | `knowledge_guide.md.jinja2`   | 全局知识库使用指南（注入到主 prompt 末尾）     | 无（纯静态文本）                                                               |
 | `profile_guide.md.jinja2`     | 用户画像渐进式构建指南（注入到主 prompt 末尾） | 无（纯静态文本）                                                               |
@@ -233,8 +231,9 @@ PROMPT_README = """\
 ## 注意事项
 
 - 不要删除 `{% if character_prompt %}` 块——它用于注入 Bot 的角色设定
-- `last_run` 变量只在非首次循环时有值
-- `current_time` 格式为 `YYYY-MM-DD HH:MM:SS UTC`
+- `current_date` 只到日粒度，用来保持 system 前缀跨轮稳定（可命中缓存）
+- 精确时间、上轮摘要、待办计数、记忆库规模一律不进模板，
+  由工具 `subconscious_get_context` 按需拉取，避免把过期快照写进 system
 - `target_user_id` 是配置中指定的数字 ID 字符串
 
 ## 默认行为

@@ -192,6 +192,17 @@ DUPLICATE_HELPER_SCHEMA = FunctionDefinitionSchema(
     ),
 )
 
+GET_CONTEXT_SCHEMA = FunctionDefinitionSchema(
+    name="subconscious_get_context",
+    description=(
+        "获取本轮运行环境：精确时间、距上轮间隔、上轮摘要、待审查知识建议、"
+        "记忆库规模与热度窗口。每轮应先调用本工具，再决定做什么。"
+        "返回中的 stale 字段列出本次未取到的项，不要推测它们的值。"
+    ),
+    parameters=FunctionParametersSchema(type="object", properties={}, required=[]),
+)
+
+
 GET_MEMORY_STATS_SCHEMA = FunctionDefinitionSchema(
     name="subconscious_get_memory_stats",
     description="获取记忆库统计概览：总数、重要性分布、标签分布、时间范围。用于判断是否需要压缩。",
@@ -418,6 +429,7 @@ _SUBCONSCIOUS_TOOL_FUNCTIONS: list[ToolFunctionSchema] = [
         LIST_MEMORY_SCHEMA,
         ITER_STOP_SCHEMA,
         DUPLICATE_HELPER_SCHEMA,
+        GET_CONTEXT_SCHEMA,
         GET_MEMORY_STATS_SCHEMA,
         KNOWLEDGE_LIST_SCHEMA,
         KNOWLEDGE_READ_SCHEMA,

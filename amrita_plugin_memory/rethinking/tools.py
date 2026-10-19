@@ -27,6 +27,7 @@ from .consts import DEFAULT_SEND_PROMPT, ensure_prompt_file, load_character_prom
 from .schemas import (
     DELETE_MEMORY_SCHEMA,
     DUPLICATE_HELPER_SCHEMA,
+    GET_CONTEXT_SCHEMA,
     GET_MEMORY_STATS_SCHEMA,
     GET_PROFILE_SCHEMA,
     ITER_STOP_SCHEMA,
@@ -241,9 +242,9 @@ async def subconscious_list_memory(data: dict[str, Any]) -> str:
 
 @on_tools(ITER_STOP_SCHEMA, strict=True, bound_to=_SUBCONSCIOUS_TOOLS)
 async def subconscious_iter_stop(data: dict[str, Any]) -> str:
-    logger.info(
-        f"[Subconscious] iter_stop: summary={str(data.get('summary', ''))[:80]}"
-    )
+    summary = str(data.get("summary", ""))
+    _state.set_last_iter_summary(summary)
+    logger.info(f"[Subconscious] iter_stop: summary={summary[:80]}")
     return json.dumps(
         {"status": "acknowledged", "message": "推理循环已确认结束"}, ensure_ascii=False
     )
@@ -578,6 +579,91 @@ async def subconscious_duplicate_helper(data: dict[str, Any]) -> str:
             f"subconscious_duplicate_helper error: {e}"
         )
         return _tools_err(str(e))
+
+
+@on_tools(GET_CONTEXT_SCHEMA, strict=True, bound_to=_SUBCONSCIOUS_TOOLS)
+async def subconscious_get_context(data: dict[str, Any]) -> str:
+    """聚合本轮运行环境；单项失败只标 stale，不中断。"""
+    stale: list[str] = []
+    runner = _state.get_runner()
+    cfg = runner._config if runner is not None else None
+
+    tz_name = getattr(cfg, "idle_timezone", "Asia/Shanghai") if cfg else "Asia/Shanghai"
+    try:
+        from zoneinfo import ZoneInfo
+
+        tz = ZoneInfo(tz_name)
+    except Exception:
+        tz = timezone.utc
+        stale.append("timezone")
+
+    now = datetime.now(timezone.utc)
+    local = now.astimezone(tz)
+
+    last_at = _state.get_last_run_at()
+    if last_at > 0:
+        gap_minutes = int((now.timestamp() - last_at) // 60)
+        last_run_iso = datetime.fromtimestamp(last_at, tz).isoformat()
+    else:
+        gap_minutes = None
+        last_run_iso = None
+
+    suggested = _state.get_knowledge_suggestions()
+
+    total = None
+    low_count = None
+    threshold = None
+    memory_hint = ""
+    try:
+        ope = _make_operator()
+        await ope.init()
+        pid = _get_partition_id()
+        total = await ope.count_user_notes(pid)
+        threshold = getattr(cfg, "memory_warn_threshold", 100) if cfg else 100
+        if total > threshold:
+            result = await ope.get_all_notes(pid, include=["metadatas"])
+            low_count = sum(
+                1
+                for m in (result.get("metadatas") or [])
+                if isinstance(m, dict) and m.get("importance") == "low"
+            )
+            memory_hint = (
+                f"记忆库已有 {total} 条（低重要性 {low_count} 条），"
+                "建议本轮优先用 subconscious_duplicate_helper 整理合并。"
+            )
+    except Exception as e:
+        logger.warning(f"[Subconscious] get_context memory stats failed: {e}")
+        stale.append("memory_stats")
+
+    plan_info = None
+    try:
+        if runner is not None and getattr(runner, "_planner", None) is not None:
+            plan_info = runner._planner.last_plan_dict()
+    except Exception:
+        stale.append("idle_plan")
+
+    return json.dumps(
+        {
+            "status": "success",
+            "now": local.strftime("%Y-%m-%d %H:%M:%S"),
+            "timezone": tz_name,
+            "weekday": local.strftime("%A"),
+            "last_run_at": last_run_iso,
+            "minutes_since_last_run": gap_minutes,
+            "last_run_summary": _state.get_last_iter_summary() or None,
+            "pending_knowledge_suggestions": {
+                "count": len(suggested),
+                "ids": [s.get("kid") or s.get("title") or "?" for s in suggested][:20],
+            },
+            "memory_total": total,
+            "memory_low_importance": low_count,
+            "memory_warn_threshold": threshold,
+            "memory_hint": memory_hint,
+            "idle_plan": plan_info,
+            "stale": stale,
+        },
+        ensure_ascii=False,
+    )
 
 
 @on_tools(GET_MEMORY_STATS_SCHEMA, strict=True, bound_to=_SUBCONSCIOUS_TOOLS)

@@ -18,6 +18,9 @@ _pending_messages: list[PendingMsg] = []
 _penalty_count: int = 0
 # 知识建议队列 — 对话 LLM 提议创建/更新知识，潜意识 Agent 下一轮审查
 _knowledge_suggestions: list[dict[str, str]] = []
+# 上一轮 iter_stop 的摘要与结束时间 — 供 subconscious_get_context 读取
+_last_iter_summary: str = ""
+_last_run_at: float = 0.0
 # 隔离的工具管理器 — 所有 @on_tools 装饰器通过 bound_to 注册到这里，不污染全局 ToolsManager
 _SUBCONSCIOUS_TOOLS = MultiToolsManager()
 
@@ -89,3 +92,21 @@ def set_knowledge_suggestions(suggestions: list[dict[str, str]]) -> None:
 def add_knowledge_suggestion(suggestion: dict[str, str]) -> None:
     global _knowledge_suggestions
     _knowledge_suggestions.append(suggestion)
+
+
+def get_last_iter_summary() -> str:
+    return _last_iter_summary
+
+
+def set_last_iter_summary(text: str) -> None:
+    global _last_iter_summary
+    _last_iter_summary = text
+
+
+def get_last_run_at() -> float:
+    return _last_run_at
+
+
+def set_last_run_at(ts: float) -> None:
+    global _last_run_at
+    _last_run_at = ts

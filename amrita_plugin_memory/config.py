@@ -42,6 +42,59 @@ class SubconsciousConfig(BaseModel):
     rethink_max_delay_minutes: int = Field(
         default=1440, ge=60, le=10080, description="惩罚延迟上限（分钟），默认1天"
     )
+    use_idle_window_planner: bool = Field(
+        default=True,
+        description="是否启用空闲窗口调度（热度图 + 冷段二分）；关闭后回退到旧的固定延迟方案",
+    )
+    idle_timezone: str = Field(
+        default="Asia/Shanghai", description="热度图与窗口计算使用的时区"
+    )
+    idle_fine_tau_days: float = Field(
+        default=28.0, ge=1.0, description="单片星期几层的衰减常数（天）"
+    )
+    idle_coarse_tau_days: float = Field(
+        default=14.0, ge=1.0, description="全局层的衰减常数（天）"
+    )
+    idle_shrink_k: float = Field(
+        default=4.0, ge=0.0, description="细层向全局收缩的强度，越大越保守"
+    )
+    idle_min_sample_days_fine: int = Field(
+        default=6, ge=1, description="启用单片星期几层所需的最少活跃天数"
+    )
+    idle_min_sample_days_mid: int = Field(
+        default=3, ge=1, description="启用工作日/周末层所需的最少活跃天数"
+    )
+    idle_cold_pct_max: float = Field(
+        default=0.05, ge=0.0, le=1.0, description="冷槽的占比上限"
+    )
+    idle_cold_abs_max: float = Field(
+        default=1.0, ge=0.0, description="冷槽的原始计数上限，避免稀疏样本全部判冷"
+    )
+    idle_target_hour: int = Field(
+        default=3, ge=0, le=23, description="偏好触发时刻（本地时区小时）"
+    )
+    idle_base_slots: int = Field(
+        default=3, ge=1, description="首次计划要求的最短冷段（槽，1 槽=2h）"
+    )
+    idle_max_slots: int = Field(default=6, ge=1, description="冷段要求的封顶槽数")
+    idle_penalty_multiplier: float = Field(
+        default=1.5, ge=1.0, le=10.0, description="惩罚对冷段要求的放大倍率"
+    )
+    idle_max_relax_steps: int = Field(
+        default=3, ge=0, le=6, description="冷段不足时允许的减半放宽次数"
+    )
+    idle_buffer_minutes: int = Field(
+        default=15, ge=0, description="窗口起止的安全缓冲（分钟）"
+    )
+    idle_run_estimate_minutes: int = Field(
+        default=10, ge=0, description="单轮 DMN 预计耗时（分钟），用于扣减可用窗口"
+    )
+    idle_fallback_minutes: int = Field(
+        default=120, ge=10, description="冷启动或规划失败时的固定窗口长度（分钟）"
+    )
+    idle_noise_gap_minutes: int = Field(
+        default=15, ge=0, description="连发消息合并为单点的最小间隔（分钟）"
+    )
     prompt_file: str = Field(
         default="prompt/subconscious_main.md.jinja2",
         description="主推理提示词文件名，相对于 config/amrita_plugin_memory/",

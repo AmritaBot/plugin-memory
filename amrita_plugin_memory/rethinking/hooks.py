@@ -1,5 +1,7 @@
 """Hook 注册与生命周期管理。"""
 
+import time
+
 from amrita.plugins.chat.runtime import try_get_amrita_ctx
 from amrita_core.hook.event import PreCompletionEvent
 from amrita_core.hook.on import on_precompletion
@@ -25,7 +27,7 @@ async def _setup_subconscious_hook() -> None:
             return
 
         try:
-            await runner.cancel_and_reschedule()
+            await runner.cancel_and_reschedule(chat_ts=time.time())
         except Exception as e:
             # 调度失败不能影响用户这条消息的处理
             logger.opt(exception=e, colors=True, raw=True).error(
