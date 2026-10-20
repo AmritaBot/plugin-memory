@@ -15,7 +15,7 @@ from __future__ import annotations
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, tzinfo
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -37,7 +37,7 @@ def _cell(wd: int, slot: int) -> int:
     return wd * SLOTS_PER_DAY + (slot % SLOTS_PER_DAY)
 
 
-def slot_of(ts: float, tz: ZoneInfo) -> tuple[int, int]:
+def slot_of(ts: float, tz: tzinfo) -> tuple[int, int]:
     """把 unix 时间戳换成 (星期几 0=周一, 槽位 0..11)。"""
     dt = datetime.fromtimestamp(ts, tz)
     wd = dt.weekday()
@@ -199,6 +199,7 @@ class IdlePlanner:
 
     def __init__(self, cfg: Any) -> None:
         self._cfg = cfg
+        self.tz: tzinfo
         tz_name = getattr(cfg, "idle_timezone", "Asia/Shanghai")
         try:
             self.tz = ZoneInfo(tz_name)
