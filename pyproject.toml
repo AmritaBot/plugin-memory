@@ -37,7 +37,6 @@ module_name = "nonebot.adapters.onebot.v11"
 [tool.uv]
 dev-dependencies = [
     "ruff>=0.12.8",
-    "pytest>=8.4.1",
     # `ambot memory` 依赖 0.2.1 起的 entry point extras（[full_load]）支持
     "ambot-inlinectl>=0.2.1",
 ]

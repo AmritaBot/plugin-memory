@@ -49,7 +49,7 @@ python -m py_compile amrita_plugin_memory/**/*.py
 4. 手动跑一遍改动的命令（`/memory`、`ambot memory`）或工具调用，并在 PR 里说明验证方式与结果
 
 纯逻辑尽量写成可独立执行的形式，方便用 `python -c` 或临时脚本验证；不要把临时脚本提交进仓库。
-`tests/` 下既有的 `test_schedule.py` 是需要 nonebot 初始化才能跑的历史文件，不作为改动门槛。
+本仓库无 `tests/` 目录，也不要新建。纯逻辑写成可独立执行的形式，用临时脚本验证后不提交。
 
 ## 工具注册的三条路径
 
