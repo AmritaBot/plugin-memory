@@ -7,7 +7,7 @@
 - 规划：环形找连续冷槽 -> 段内用原始时间戳做分钟级二分 -> 扣 buffer 得可用窗口。
 - 保底：冷段不足门槛时逐次减半放宽，最后强制取最长冷段。
 
-本模块不依赖 nonebot，纯数据 + 纯函数，便于独立单测。
+本模块不依赖 nonebot，纯数据 + 纯函数，可脱离运行时单独验证。
 """
 
 from __future__ import annotations
@@ -59,9 +59,6 @@ def slot_of(ts: float, tz: tzinfo) -> tuple[int, int]:
     wd = dt.weekday()
     slot = (dt.hour * 60 + dt.minute) // SLOT_MINUTES
     return wd, slot
-
-
-# ---------------------------------------------------------------- 纯函数工具
 
 
 def merge_noise(ts: Sequence[float], gap_seconds: float) -> list[float]:
@@ -173,9 +170,6 @@ def _runs(
     return out
 
 
-# ---------------------------------------------------------------- 规划结果
-
-
 @dataclass
 class Plan:
     """一次调度规划的结果。"""
@@ -231,9 +225,6 @@ class PlannerState:
         }
 
 
-# ---------------------------------------------------------------- 规划器
-
-
 class IdlePlanner:
     """基于热度图的空闲窗口规划器。"""
 
@@ -261,8 +252,6 @@ class IdlePlanner:
         self.run_estimate = getattr(cfg, "idle_run_estimate_minutes", 10)
         self.fallback_minutes = getattr(cfg, "idle_fallback_minutes", 120)
         self._last_plan: Plan | None = None
-
-    # ------------------------------------------------------------ 持久化
 
     def load(self, payload: dict[str, Any]) -> None:
         raw = payload.get("idle_planner") if isinstance(payload, dict) else None
@@ -302,8 +291,6 @@ class IdlePlanner:
 
     def dump(self) -> dict[str, Any]:
         return {"idle_planner": self.state.to_dict()}
-
-    # ------------------------------------------------------------ 观测
 
     def _decay(self, now_ts: float) -> None:
         if self.state.last_update <= 0:
@@ -357,8 +344,6 @@ class IdlePlanner:
     def note_window_taken(self, start_ts: float) -> None:
         """窗口实际被占用后，把该时段计入一次观测（避免反复选同一段）。"""
         self.observe(start_ts + 60)
-
-    # ------------------------------------------------------------ 分层分值
 
     def active_days_of(self, weekdays: Sequence[int]) -> int:
         """统计近期活跃天数：超过粗层半衰期 4 倍的老日期不再计入。
@@ -418,8 +403,6 @@ class IdlePlanner:
             tiers.append("mid")
         tiers.append("coarse")
         return tiers
-
-    # ------------------------------------------------------------ 冷段
 
     def _tier_for_neighbor(self, tier: str, wd: int) -> str:
         """跨午夜扫描时，给相邻星期几单独挑一档可用分层。
@@ -578,8 +561,6 @@ class IdlePlanner:
             penalty=penalty,
             note=note,
         )
-
-    # ------------------------------------------------------------ 主流程
 
     def _fallback(self, now: datetime, penalty: int, note: str) -> Plan:
         local = now.astimezone(self.tz)
