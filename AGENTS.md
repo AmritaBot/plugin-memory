@@ -21,6 +21,7 @@
 | `permissions.py` | 会话侧读取权限校验 |
 | `profile_store.py` | 画像路径与 Markdown 解析（纯函数，不依赖 nonebot 运行时） |
 | `rethinking/` | DMN 循环：runner、tools、schemas、knowledge、schedule |
+| `rethinking/schedule.py` | 空闲窗口规划（纯数据 + 纯函数，`resolve_timezone` 是全局唯一的时区解析入口） |
 
 新增纯逻辑优先放进不依赖 nonebot 的模块（如 `profile_store.py`、`rethinking/schedule.py`），运行器只做编排。
 

@@ -88,6 +88,13 @@ class SubconsciousRunner:
         # 重排节流：一分钟内重复触发只更新惩罚与热度，不重复规划
         self._last_replan_at: float = 0.0
         self._replan_throttle: float = _REPLAN_THROTTLE_SECONDS
+        # 状态写入串行化：并发 save 先后到达时，旧快照不能盖掉新快照
+        self._state_lock = asyncio.Lock()
+        # 正在跑的周期任务，用户新消息到来时可以掐断
+        self._cycle_task: asyncio.Task | None = None
+        # 本轮是否已取过上下文，供 iter_stop 校验
+        _state.reset_context_fetched()
+        _state.reset_cycle_valid()
 
     @property
     def is_running(self) -> bool:
@@ -139,42 +146,92 @@ class SubconsciousRunner:
         然后按新的冷段门槛重新选窗口。不 dump/恢复上下文——
         用户聊完天后有新内容，旧推理上下文应直接丢弃。
         """
-        # 热度图观测：每条消息都算，加深该时间窗口的热点
+        # 先记下历史是否存在：首条消息会把热度图从空变成非空，
+        # 若观测后再判断，冷启动就会被自己这条消息绕过
+        had_history = True
         with contextlib.suppress(Exception):
+            had_history = self._planner.has_history()
             self._planner.observe(chat_ts)
         penalty = _state.increment_penalty()
+
+        # 用户在聊天，正在跑的那一轮已经过时了，掐掉避免它把旧结论写回记忆
+        self._abort_running_cycle()
+
         now_mono = time.monotonic()
         if now_mono - self._last_replan_at < self._replan_throttle:
-            # 同窗口内的后续消息不重排，避免每条消息都扫一遍热度图
-            with contextlib.suppress(Exception):
-                await self._save_state()
+            # 同窗口内的后续消息不重排，但仍把待执行任务往后挪，
+            # 否则旧任务会在用户刚开始的这轮活动里跑起来
+            self._defer_pending_job(penalty, had_history)
+            await self._save_state_logged()
             return
         self._last_replan_at = now_mono
         with contextlib.suppress(Exception):
             scheduler.remove_job(self._job_id)
-        if self._config.use_idle_window_planner:
-            plan = self._planner.plan(penalty)
-            logger.info(
-                f"[Subconscious] Rescheduled: penalty=#{penalty}, {describe(plan)}"
-            )
-            delay_seconds = int(
-                max(60.0, (plan.start - datetime.now(timezone.utc)).total_seconds())
-            )
-        else:
-            base = self._config.rethink_base_delay_minutes
+
+        delay_seconds = self._compute_delay(penalty, had_history)
+        self._schedule_once(delay_seconds)
+        # 惩罚计数与热度图落盘，避免重启后丢掉已累积的退避
+        await self._save_state_logged()
+
+    def _compute_delay(self, penalty: int, had_history: bool) -> int:
+        """算下一次运行要等多久（秒）。规划失败时退到保底窗口。"""
+        base = self._config.rethink_base_delay_minutes
+        cap = self._config.rethink_max_delay_minutes
+        if not self._config.use_idle_window_planner:
             multiplier = self._config.rethink_penalty_multiplier
-            cap = self._config.rethink_max_delay_minutes
-            raw = base * (multiplier ** (penalty - 1))
+            raw = base * (multiplier ** min(max(penalty - 1, 0), 32))
             delay_minutes = min(raw, cap)
             logger.info(
                 f"[Subconscious] Rescheduled(legacy): penalty=#{penalty}, "
-                f"delay={delay_minutes:.0f}min (raw={raw:.0f}min, cap={cap}min)"
+                f"delay={delay_minutes:.0f}min (cap={cap}min)"
             )
-            delay_seconds = int(delay_minutes * 60)
-        self._schedule_once(delay_seconds)
-        # 惩罚计数与热度图落盘，避免重启后丢掉已累积的退避
-        with contextlib.suppress(Exception):
+            return int(delay_minutes * 60)
+
+        try:
+            if had_history:
+                plan = self._planner.plan(penalty)
+            else:
+                # 冷启动只攒到一条样本，不足以判断作息，先走保底窗口
+                plan = self._planner.fallback_plan(penalty)
+        except Exception as e:
+            logger.opt(exception=e, colors=True, raw=True).error(
+                f"[Subconscious] Plan failed, fall back to fixed delay: {e}"
+            )
+            return int(min(base, cap) * 60)
+        logger.info(f"[Subconscious] Rescheduled: penalty=#{penalty}, {describe(plan)}")
+        return int(max(60.0, (plan.start - datetime.now(timezone.utc)).total_seconds()))
+
+    def _defer_pending_job(self, penalty: int, had_history: bool) -> None:
+        """节流期内不重新规划，只把待执行任务顺延到新的候选窗口。"""
+        try:
+            job = scheduler.get_job(self._job_id)
+            if job is None:
+                # 本就没有待执行任务（可能在运行中），补一个
+                self._schedule_once(self._compute_delay(penalty, had_history))
+                return
+            delay = self._compute_delay(penalty, had_history)
+            run_date = datetime.now(timezone.utc) + timedelta(seconds=delay)
+            if job.next_run_time is not None and job.next_run_time < run_date:
+                scheduler.reschedule_job(
+                    self._job_id, trigger="date", run_date=run_date
+                )
+        except Exception as e:
+            logger.warning(f"[Subconscious] Defer pending job failed: {e}")
+
+    def _abort_running_cycle(self) -> None:
+        """用户发了新消息，掐断正在跑的那一轮。"""
+        task = self._cycle_task
+        if task is None or task.done():
+            return
+        logger.info("[Subconscious] New chat arrived, aborting in-flight cycle")
+        task.cancel()
+
+    async def _save_state_logged(self) -> None:
+        """保存状态，失败要出声：写盘失败会让重启后的退避凭空消失。"""
+        try:
             await self._save_state()
+        except Exception as e:
+            logger.warning(f"[Subconscious] Save state failed: {e}")
 
     def _schedule_once(self, delay_seconds: int) -> None:
         run_date = datetime.now(timezone.utc) + timedelta(seconds=delay_seconds)
@@ -202,6 +259,8 @@ class SubconsciousRunner:
             logger.warning("[Subconscious] Already running, skip")
             return
         self._is_running = True
+        self._cycle_task = asyncio.current_task()
+        self._context_fetched = False
         try:
             # 窗口已实际占用：记一次观测，避免下一轮重复选同一段
             with contextlib.suppress(Exception):
@@ -246,6 +305,11 @@ class SubconsciousRunner:
             logger.info("[Subconscious] Cycle start")
             chat_obj.begin()
             await chat_obj
+        except asyncio.CancelledError:
+            # 用户发来新消息把本轮掐了：旧上下文作废，不写摘要也不动惩罚
+            logger.info("[Subconscious] Cycle aborted by new user message")
+            self._chat_obj = None
+            raise
         except Exception as e:
             logger.opt(exception=e, colors=True, raw=True).exception(
                 f"[Subconscious] Error: {e}"
@@ -280,7 +344,10 @@ class SubconsciousRunner:
         self._total_runs += 1
         _state.set_last_run_at(datetime.now(timezone.utc).timestamp())
 
-        # 先持久化，任一失败则不重置惩罚（保留重试机会）
+        # 先持久化，任一失败则不重置惩罚（保留重试机会）。
+        # 记下快照时的计数：保存期间用户可能又发消息把惩罚顶上去，
+        # 那部分增量不能被这次 reset 抹掉。
+        penalty_before = _state.get_penalty_count()
         save_ok = True
         try:
             await self._save_state()
@@ -288,7 +355,20 @@ class SubconsciousRunner:
             logger.warning(f"[Subconscious] Save state failed: {e}")
             save_ok = False
 
-        if save_ok:
+        if not save_ok:
+            logger.warning(
+                f"[Subconscious] Cycle done but save failed, "
+                f"penalty NOT reset (penalty={_state.get_penalty_count()})"
+            )
+        elif not _state.is_cycle_valid():
+            # 空转周期（没取上下文就收工）不清惩罚，保留压力等下一轮
+            logger.warning("[Subconscious] Cycle invalid, penalty kept")
+        elif _state.get_penalty_count() != penalty_before:
+            # 保存期间用户又发了消息，新增的那部分惩罚不能被这次收尾抹掉
+            logger.info(
+                "[Subconscious] Penalty kept: new chat arrived during the cycle"
+            )
+        else:
             _state.reset_penalty()
             # 惩罚清零也要落盘，否则重启会加载旧退避
             try:
@@ -298,11 +378,6 @@ class SubconsciousRunner:
             logger.info(
                 f"[Subconscious] Cycle done (total_runs={self._total_runs}), "
                 f"penalty reset, waiting for next user chat"
-            )
-        else:
-            logger.warning(
-                f"[Subconscious] Cycle done but save failed, "
-                f"penalty NOT reset (penalty={_state.get_penalty_count()})"
             )
 
     async def _update_usage(self, chat_obj: ChatObject) -> None:
@@ -403,11 +478,16 @@ class SubconsciousRunner:
             if isinstance(suggestions, list):
                 _state.set_knowledge_suggestions(suggestions)
             _state.set_last_iter_summary(str(payload.get("last_iter_summary", "")))
-            _state.set_last_run_at(float(payload.get("last_run_ts", 0.0) or 0.0))
+            _state.set_last_run_at(self._read_last_run_ts(payload))
             self._planner.load(payload)
             # 旧 penalty 语义是"被推迟的次数"，与新语义（要求的冷段长度）不可换算，
-            # 升级后清零一次，避免带着旧值把门槛顶到上限
-            if "idle_planner" not in payload and _state.get_penalty_count() > 0:
+            # 升级后清零一次，避免带着旧值把门槛顶到上限。
+            # 仍走旧调度时数值是自洽的，别动它。
+            if (
+                self._config.use_idle_window_planner
+                and "idle_planner" not in payload
+                and _state.get_penalty_count() > 0
+            ):
                 logger.info(
                     "[Subconscious] Migrate: reset legacy penalty "
                     f"#{_state.get_penalty_count()} (old delay-based semantics)"
@@ -415,6 +495,23 @@ class SubconsciousRunner:
                 _state.reset_penalty()
         except Exception as e:
             logger.warning(f"[Subconscious] Load state failed: {e}")
+
+    @staticmethod
+    def _read_last_run_ts(payload: dict[str, Any]) -> float:
+        """取上轮运行时间，兼容 0.7.1 只写 last_run_time 的旧快照。"""
+        raw = payload.get("last_run_ts")
+        try:
+            if raw is not None:
+                return float(raw or 0.0)
+        except (TypeError, ValueError):
+            pass
+        legacy = payload.get("last_run_time")
+        if isinstance(legacy, str) and legacy:
+            try:
+                return datetime.fromisoformat(legacy).timestamp()
+            except ValueError:
+                return 0.0
+        return 0.0
 
     async def _migrate_legacy_state(self) -> dict[str, Any]:
         """迁移旧版本挪用的 Bot Memory 表元状态（extra_prompt/memory_json）。"""
@@ -448,7 +545,15 @@ class SubconsciousRunner:
         return payload
 
     async def _save_state(self) -> None:
-        """保存元状态到 SubconsciousState 表。"""
+        """保存元状态到 SubconsciousState 表。
+
+        加锁串行化：并发调用时若旧快照后提交，会把新的热度与惩罚盖掉。
+        """
+        async with self._state_lock:
+            await self._save_state_locked()
+
+    async def _save_state_locked(self) -> None:
+        """真正写盘的部分，调用方需已持有 _state_lock。"""
         payload: dict[str, Any] = {
             "total_runs": self._total_runs,
             "last_run_time": datetime.now(timezone.utc).isoformat(),
@@ -459,7 +564,19 @@ class SubconsciousRunner:
             "pending_messages": _state.get_pending(),
             "knowledge_suggestions": _state.get_knowledge_suggestions(),
         }
-        payload.update(self._planner.dump())
+        # 只有启用空闲窗口调度时才写热度图：旧调度模式下写进去，
+        # 会让下次升级的迁移判断误以为已是新格式，跳过旧 penalty 清零
+        if self._config.use_idle_window_planner:
+            payload.update(self._planner.dump())
+        # 整行替换前先补齐老版本实例写过、本实例不认识的字段，
+        # 否则旧实例一存盘，热度图累积就被抹成"从没规划过"
+        try:
+            existing = await self._read_state_payload(_STATE_UID)
+        except Exception:
+            existing = {}
+        for key, value in existing.items():
+            if key not in payload:
+                payload[key] = value
         await self._write_state_payload(_STATE_UID, payload)
 
     async def _load_prompt(self) -> str:

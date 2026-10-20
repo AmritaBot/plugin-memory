@@ -29,6 +29,7 @@ from ..profile_store import PROFILE_PATH, read_profile
 from ..vector import AsyncUserMemory, MemoryMetadata, get_db_conn
 from . import _state
 from .consts import DEFAULT_SEND_PROMPT, ensure_prompt_file, load_character_prompt
+from .schedule import resolve_timezone
 from .schemas import (
     DELETE_MEMORY_SCHEMA,
     DUPLICATE_HELPER_SCHEMA,
@@ -63,6 +64,9 @@ except ImportError:
 #: duplicate_helper 单次返回的记忆条数默认值 / 上限
 _DUPLICATE_DEFAULT_LIMIT = 40
 _DUPLICATE_MAX_LIMIT = 200
+
+#: get_context 里向量库操作的超时上限（秒），超时只标 stale 不阻塞循环
+_CONTEXT_DB_TIMEOUT = 8.0
 
 _SUBCONSCIOUS_TOOLS = _state.get_tools_manager()
 
@@ -249,6 +253,15 @@ async def subconscious_list_memory(data: dict[str, Any]) -> str:
 @on_tools(ITER_STOP_SCHEMA, strict=True, bound_to=_SUBCONSCIOUS_TOOLS)
 async def subconscious_iter_stop(data: dict[str, Any]) -> str:
     summary = str(data.get("summary", ""))
+    if not _state.is_context_fetched():
+        # 没取环境就收工：周期算无效，不写摘要。惩罚保持不清零，
+        # 下一次调度仍带着这轮攒的量，避免"空转一轮还被当成完成"
+        logger.warning("[Subconscious] iter_stop without get_context, cycle invalid")
+        _state.mark_cycle_invalid()
+        return _tools_err(
+            "本轮未调用 subconscious_get_context，周期无效。"
+            "请先取当前环境再决定是否整理记忆"
+        )
     _state.set_last_iter_summary(summary)
     logger.info(f"[Subconscious] iter_stop: summary={summary[:80]}")
     return json.dumps(
@@ -594,13 +607,10 @@ async def subconscious_get_context(data: dict[str, Any]) -> str:
     runner = _state.get_runner()
     cfg = runner._config if runner is not None else None
 
-    tz_name = getattr(cfg, "idle_timezone", "Asia/Shanghai") if cfg else "Asia/Shanghai"
-    try:
-        from zoneinfo import ZoneInfo
-
-        tz = ZoneInfo(tz_name)
-    except Exception:
-        tz = timezone.utc
+    tz_cfg = getattr(cfg, "idle_timezone", "Asia/Shanghai") if cfg else "Asia/Shanghai"
+    # 与调度侧共用同一份解析，避免规划窗口与回报钟点分处两个时区
+    tz, tz_name, tz_fell_back = resolve_timezone(tz_cfg)
+    if tz_fell_back:
         stale.append("timezone")
 
     now = datetime.now(timezone.utc)
@@ -622,12 +632,17 @@ async def subconscious_get_context(data: dict[str, Any]) -> str:
     memory_hint = ""
     try:
         ope = _make_operator()
-        await ope.init()
+        await asyncio.wait_for(ope.init(), timeout=_CONTEXT_DB_TIMEOUT)
         pid = _get_partition_id()
-        total = await ope.count_user_notes(pid)
+        total = await asyncio.wait_for(
+            ope.count_user_notes(pid), timeout=_CONTEXT_DB_TIMEOUT
+        )
         threshold = getattr(cfg, "memory_warn_threshold", 100) if cfg else 100
         if total > threshold:
-            result = await ope.get_all_notes(pid, include=["metadatas"])
+            result = await asyncio.wait_for(
+                ope.get_all_notes(pid, include=["metadatas"]),
+                timeout=_CONTEXT_DB_TIMEOUT,
+            )
             low_count = sum(
                 1
                 for m in (result.get("metadatas") or [])
@@ -648,11 +663,13 @@ async def subconscious_get_context(data: dict[str, Any]) -> str:
     except Exception:
         stale.append("idle_plan")
 
+    _state.mark_context_fetched()
     return json.dumps(
         {
             "status": "success",
             "now": local.strftime("%Y-%m-%d %H:%M:%S"),
             "timezone": tz_name,
+            "timezone_fallback": tz_fell_back,
             "weekday": local.strftime("%A"),
             "last_run_at": last_run_iso,
             "minutes_since_last_run": gap_minutes,
