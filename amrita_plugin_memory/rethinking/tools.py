@@ -20,7 +20,12 @@ from jinja2 import Template
 from nonebot import logger
 
 from ..keys import make_scope_id
-from ..permissions import can_read_knowledge, get_event_from_tool_ctx
+from ..permissions import (
+    can_read_knowledge,
+    can_read_profile,
+    get_event_from_tool_ctx,
+)
+from ..profile_store import PROFILE_PATH, read_profile
 from ..vector import AsyncUserMemory, MemoryMetadata, get_db_conn
 from . import _state
 from .consts import DEFAULT_SEND_PROMPT, ensure_prompt_file, load_character_prompt
@@ -41,6 +46,7 @@ from .schemas import (
     LIST_MEMORY_SCHEMA,
     READ_CHAT_CONTEXT_SCHEMA,
     READ_MEMORY_SCHEMA,
+    READ_PROFILE_SCHEMA,
     READ_SESSIONS_SCHEMA,
     READ_SUGGESTIONS_SCHEMA,
     SEND_TO_USER_SCHEMA,
@@ -891,6 +897,32 @@ async def knowledge_search_authorized(ctx: ToolContext) -> str | None:
     if not await can_read_knowledge(get_event_from_tool_ctx(ctx)):
         return _deny_knowledge()
     return await subconscious_knowledge_search(ctx.data)
+
+
+# 会话侧只读入口：用户画像，仅画像所有者（DMN 目标用户）可读
+
+
+def _deny_profile() -> str:
+    return _tools_err("无权限读取该画像（仅离线巩固循环的目标用户可读自己的画像）")
+
+
+@on_tools(READ_PROFILE_SCHEMA, strict=True, custom_run=True)
+async def read_profile_authorized(ctx: ToolContext) -> str | None:
+    """对话 LLM 读取用户画像，仅限 DMN 目标用户本人。"""
+    if not await can_read_profile(get_event_from_tool_ctx(ctx)):
+        return _deny_profile()
+    try:
+        profile = read_profile(
+            PROFILE_PATH,
+            start_line=ctx.data.get("start_line"),
+            end_line=ctx.data.get("end_line"),
+        )
+        return _tools_ok(**profile)
+    except Exception as e:
+        logger.opt(exception=e, colors=True, raw=True).exception(
+            f"read_profile error: {e}"
+        )
+        return _tools_err(str(e))
 
 
 # 知识建议：对话 LLM -> 潜意识 Agent 审查管线

@@ -67,13 +67,3 @@ class SessionSummary(TypedDict):
     created_at: float
     summary: str
     message_count: int
-
-
-class ProfileResult(TypedDict):
-    """用户画像读取返回值。"""
-
-    summary: str
-    content: str
-    total_lines: int
-    range_start: int
-    range_end: int

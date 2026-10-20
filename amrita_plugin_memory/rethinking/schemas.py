@@ -391,6 +391,27 @@ GET_PROFILE_SCHEMA = FunctionDefinitionSchema(
     ),
 )
 
+READ_PROFILE_SCHEMA = FunctionDefinitionSchema(
+    name="read_profile",
+    description=(
+        "读取本机离线巩固循环为你维护的用户画像（摘要 + 正文）。"
+        "返回值含 summary、content、total_lines、range_start、range_end；"
+        "正文较长时用 start_line / end_line 分段读取。仅画像所有者本人可读"
+    ),
+    parameters=FunctionParametersSchema(
+        type="object",
+        properties={
+            "start_line": FunctionPropertySchema(
+                type="integer", description="起始行号（0-based），默认全文"
+            ),
+            "end_line": FunctionPropertySchema(
+                type="integer", description="结束行号（不含），默认全文"
+            ),
+        },
+        required=[],
+    ),
+)
+
 UPDATE_PROFILE_SCHEMA = FunctionDefinitionSchema(
     name="subconscious_update_profile",
     description=(

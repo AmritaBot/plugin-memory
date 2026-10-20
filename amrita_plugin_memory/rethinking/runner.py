@@ -32,6 +32,7 @@ from sqlalchemy import select
 from ..config import DATA_PATH, SubconsciousConfig
 from ..keys import make_scope_id
 from ..models import SubconsciousState
+from ..profile_store import PROFILE_PATH, ProfileResult, read_profile
 from . import _state
 from .backend import SubconsciousBackend
 from .consts import (
@@ -44,7 +45,7 @@ from .consts import (
 )
 from .knowledge import KnowledgeBaseManager
 from .schedule import IdlePlanner, describe
-from .types import ProfileResult, SessionSummary
+from .types import SessionSummary
 
 _STATE_UID = "amrita_memory"
 #: 重排节流窗口（秒）
@@ -81,7 +82,7 @@ class SubconsciousRunner:
         self._kb_manager: KnowledgeBaseManager | None = None
         # session 摘要缓存（LRU）：session DB id -> 摘要文本，最多 128 条
         self._session_cache: LRUCache[int, str] = LRUCache(128)
-        self._profile_path = DATA_PATH / "user_profile.md"
+        self._profile_path = PROFILE_PATH
         # 空闲窗口规划器（热度图 + 冷段二分）
         self._planner = IdlePlanner(config)
         # 重排节流：一分钟内重复触发只更新惩罚与热度，不重复规划
@@ -571,45 +572,7 @@ class SubconsciousRunner:
         self, start_line: int | None = None, end_line: int | None = None
     ) -> ProfileResult:
         """读取用户画像 Markdown 文件，支持行数滑动窗口。"""
-        if not self._profile_path.exists():
-            return {
-                "summary": "",
-                "content": "",
-                "total_lines": 0,
-                "range_start": 0,
-                "range_end": 0,
-            }
-        try:
-            text = self._profile_path.read_text(encoding="utf-8")
-            parts = text.split("---", 1)
-            summary = parts[0].strip() if parts else ""
-            body = parts[1].strip() if len(parts) > 1 else ""
-            body_lines = body.split("\n") if body else []
-            total = len(body_lines)
-            if start_line is None:
-                s = 0
-            else:
-                s = max(0, start_line)
-            if end_line is None:
-                e = total
-            else:
-                e = max(s, min(total, end_line))
-            return {
-                "summary": summary,
-                "content": "\n".join(body_lines[s:e]),
-                "total_lines": total,
-                "range_start": s,
-                "range_end": e,
-            }
-        except Exception as e:
-            logger.warning(f"[Subconscious] Read profile failed: {e}")
-            return {
-                "summary": "",
-                "content": "",
-                "total_lines": 0,
-                "range_start": 0,
-                "range_end": 0,
-            }
+        return read_profile(self._profile_path, start_line, end_line)
 
     async def _update_profile(
         self,
