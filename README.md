@@ -6,11 +6,11 @@
 | -- | ------------- | -------------------------- | -------------------------------- | -------------------- |
 | L1 | 备忘录        | 恒常激活的持久记忆         | 插件自有 ORM 表（per-uni_id 单行） | 每轮常驻注入         |
 | L2 | 向量记忆层    | 语义记忆（按线索提取）     | ChromaDB 向量库                   | LLM 按需检索         |
-| L3 | 离线巩固循环  | 默认模式网络（DMN）        | 后台 ReAct Agent                  | 静默期自动整理       |
+| L3 | 离线巩固循环  | 默认模式网络（DMN）        | 后台 ReAct Agent                  | 空闲窗口到达时整理   |
 
 - **L1** — 一段千字内的用户元信息（身份、稳定偏好、用户要求的工具调用模式），由 LLM 维护，每轮注入 system prompt。
 - **L2** — 向量化的长尾事实库，LLM 通过工具按需读写，ChromaDB 语义检索。
-- **L3** — 用户静默时触发的后台整理循环：去重、压缩、画像精炼、知识沉淀。
+- **L3** — 用户聊过之后，在作息里的冷门时段触发一轮后台整理：去重、压缩、画像精炼、知识沉淀。
 
 ## 安装
 
@@ -48,7 +48,7 @@ enabled = true
 target_user_id = "你的QQ号"
 ```
 
-用户每次发消息后，后台 Agent 会在 30 分钟后自动整理记忆库。
+用户发过消息后，后台 Agent 会在**下一个空闲窗口**里整理记忆库 —— 默认按作息热度图挑冷门时段，而不是固定 30 分钟。
 
 > **适用场景**：L3 专为**个人助理**场景设计 —— 单个 Bot 服务单个用户。
 > 它会在后台持续调用 LLM，**每轮推理可能消耗数万 tokens**。
@@ -81,44 +81,17 @@ ambot memory status      # 查看嵌入指纹、记忆分布与备份
 [Subconscious] Idle — waiting for user chat to trigger first run
 ```
 
-用户发消息后约 30 分钟，会看到 `Cycle #1` 开始执行。
+用户发消息后会先看到 `Rescheduled: penalty=#1, ...`，里面带着选中的窗口
+（星期几、起止时刻、长度、分层、放宽次数）。时间到了才有 `Cycle start`。
+第一次运行时热度图还是空的，会直接落在 `idle_target_hour` 的固定窗口。
 
 ---
 
 ## 三层记忆模型
 
-```mermaid
-flowchart TB
-    subgraph Prompt["每轮 system prompt 注入"]
-        Memo["L1 备忘录<br/>&lt;MEMO&gt; 事实块"]
-        Extra["extra_prompt<br/>&lt;EXTRA&gt; 用户指定规则"]
-    end
-
-    subgraph L1["L1 备忘录（常驻）"]
-        MemoTable[("UserMemo 表<br/>主键 = uni_id")]
-    end
-
-    subgraph L2["L2 向量记忆层（按需）"]
-        ChromaDB[("ChromaDB<br/>amrita_user_memory")]
-    end
-
-    subgraph L3["L3 离线巩固循环（DMN）"]
-        Runner["SubconsciousRunner"]
-        KB["KnowledgeBaseManager"]
-        Profile["用户画像"]
-    end
-
-    MemoTable --> Memo
-    Memo -->|"update_memo 整篇替换"| MemoTable
-    Memo -->|"细节下放"| ChromaDB
-
-    SurfaceTools["对话 LLM 的记忆工具"] -->|"write/read/update/delete/list"| ChromaDB
-    Runner -->|"去重 / 压缩 / 精炼"| ChromaDB
-    Runner --> KB
-    Runner --> Profile
-    Runner -->|"元状态"| StateTable[("SubconsciousState 表")]
-    Runner -->|"usage 统计"| Insights["InsightsModel"]
-```
+数据流向：LLM 用 `update_memo` 整篇改写 L1；L1 临近上限时把细节下放到 L2；
+L3 在空闲窗口里读 L2 与归档 session，做去重与精炼，顺带维护知识库和画像。
+L3 的元状态（含惩罚计数与热度图）单独存在 `SubconsciousState`。
 
 ### L1 与 `extra_prompt` 的正交性
 
@@ -138,18 +111,14 @@ flowchart TB
 L3 在代码中沿用历史标识符 `subconscious` / `rethinking`（避免破坏性变更），
 文档统一表述为"离线巩固循环"，其行为与神经科学的**默认模式网络（DMN）**高度对应：
 
-| 代码标识符                        | 文档表述       | DMN 对应特征                                     |
-| --------------------------------- | -------------- | ------------------------------------------------ |
-| `rethinking/` 模块                | 离线巩固循环   | —                                                |
-| `SubconsciousRunner`              | 巩固循环运行器 | —                                                |
-| `[subconscious]` 配置节           | 巩固循环配置   | —                                                |
-| `subconscious_*` 工具             | 巩固循环工具   | —                                                |
-| 用户聊天 → `cancel_and_reschedule` | 任务负激活     | 专注任务时 DMN 被抑制                            |
-| 静默期触发 `_run`                 | 空闲时活跃     | DMN 在无任务时活跃                               |
-| 去重 / 压缩 / `ContextCompactor`   | 记忆巩固       | 海马 → 皮层的系统巩固                            |
-| 画像构建（`*_profile`）            | 自传体记忆     | DMN 负责自我参照加工                             |
-| 主动消息（`send_to_user`）         | 心智游移       | 走神产生与自我相关的念头                         |
-| 每轮数万 tokens                    | 静息高能耗     | DMN 占脑能耗约 20%                               |
+| 代码标识符                          | DMN 对应特征                |
+| ----------------------------------- | --------------------------- |
+| `rethinking/` / `subconscious_*`     | 离线巩固循环、巩固循环工具  |
+| 用户聊天 → `cancel_and_reschedule`   | 任务负激活：专注时 DMN 被抑制 |
+| 空闲窗口到达 → `_run`                | DMN 在无任务时活跃          |
+| 去重 / `ContextCompactor`            | 海马 → 皮层的系统巩固       |
+| 画像构建（`*_profile`）              | 自传体记忆                  |
+| 主动消息（`send_to_user`）           | 心智游移                    |
 
 > 它**不是**弗洛伊德式的"潜意识"：触发确定性、工具显式、日志完整、输入输出全透明。
 > 它也不是"常驻循环"——而是**事件驱动的单次任务**，跑完即空闲；用户聊天越频繁，它跑得越少。
@@ -163,10 +132,10 @@ L3 在代码中沿用历史标识符 `subconscious` / `rethinking`（避免破�
 
 ### 关键约束：严格字数上限
 
-`memo_max_chars`（默认 **1000** 字）是**硬上限**。这带来一个根本约束：
-写入原语必须是**整篇替换**而非追加，否则上限形同虚设。
+`memo_max_chars`（默认 **1000** 字）是**硬上限**。因此主力写入原语是**整篇替换**：
+`append_memo` 只是省事用的追加入口，最终仍受同一个字数校验约束。
 
-因此 `update_memo` 的语义是：
+`update_memo` 的语义是：
 
 ```text
 LLM 读当前 memo → 融合新事实 → 输出新全文 → 服务端校验长度 → 落库
@@ -202,9 +171,11 @@ LLM 读当前 memo → 融合新事实 → 输出新全文 → 服务端校验�
 
 ### 工具
 
-| 工具          | 参数      | 说明                                         |
-| ------------- | --------- | -------------------------------------------- |
-| `update_memo` | `content` | 整篇替换当前作用域的备忘录，超长则拒绝       |
+| 工具          | 说明                                       |
+| ------------- | ------------------------------------------ |
+| `read_memo`   | 读取当前作用域备忘录全文                   |
+| `append_memo` | 在末尾追加一段，不覆盖已有条目             |
+| `update_memo` | 整篇替换，超长则拒绝，返回当前字数         |
 
 ---
 
@@ -216,13 +187,9 @@ LLM 读当前 memo → 融合新事实 → 输出新全文 → 服务端校验�
 
 分区键**跟随已安装 Amrita 的会话 ID 格式**（`amrita.plugins.chat.utils.sql.make_uni_id`）：
 
-| Amrita 版本 | 格式                                               |
-| ----------- | -------------------------------------------------- |
-| ≤ 1.9.x     | `user_{qq}` / `group_{群号}`                       |
-| 开发中      | `QQPlatform_Private_{qq}` / `QQPlatform_Group_{群号}` |
-
-插件不硬编码任一格式，而是委托框架生成 —— Amrita 升级后自动跟随。
-存量数据的 Key 迁移由启动检查自动完成（见下节）。
+旧版是 `user_{qq}` / `group_{群号}`，新版换成
+`QQPlatform_Private_{qq}` / `QQPlatform_Group_{群号}`。插件不硬编码任何一种，
+而是委托框架的 `make_uni_id` 生成，Amrita 升级后自动跟随；存量 Key 由启动检查幂等迁移。
 
 `scope` 参数表达语义，与 uni_id 类型是两个维度：
 
@@ -279,46 +246,53 @@ $$\text{score} = \frac{1}{1 + d} \times \max\left(0.5^{\,\text{age} / \text{half
 
 ## L3 离线巩固循环（DMN）
 
-### 触发：事件驱动 + 指数惩罚退避
+### 触发：事件驱动 + 空闲窗口规划
 
-**不使用定时自循环** —— 只有目标用户发消息时才触发。
+**不使用定时自循环** —— 只有目标用户发消息才会推一次计划。
 
-用户每次聊天 → 取消现有计划 → 惩罚计数 +1 → 重新计算延迟：
+用户每次聊天 → 取消当前计划 → 惩罚计数 +1 → 按新的门槛重新挑窗口。
+推理成功后惩罚重置为 0；用户聊得越频繁，要求的冷段越长（**任务负激活**）。
 
-$$\text{delay} = \min(\text{base} \times \text{multiplier}^{\text{penalty}-1},\ \text{cap})$$
+默认走空闲窗口规划（`use_idle_window_planner = true`），由 `rethinking/schedule.py`
+算出一个具体的本地时间窗：
 
-默认 `base=30min`、`multiplier=1.5`、`cap=1440min`。推理成功后惩罚重置为 0。
-用户连续聊天会自动推开推理（**任务负激活**），长时间沉默后恢复正常频率。
+- **热度图**：7 天 × 12 槽（2h），消息给所在槽 +1，全局层 τ=14 天、单片星期几层 τ=28 天
+- **分层**：fine（单片星期几）/ mid（工作日-周末）/ coarse（全局），按活跃天数逐级降级
+- **冷槽**：占比 ≤ 5% 且原始计数 ≤ 1；冷段环形扫描，跨零点的 22:00–08:00 不被切断
+- **细化**：段内回到原始时间戳，合并连发噪声后二分求上界，扣 buffer 与预估耗时
+- **penalty 语义**：是"要求多长的冷段"，不是"推迟多少分钟" —— `3 槽 × 1.5^(n-1)`
+  封顶 6 槽，不足就减半放宽三次，仍不足取最长冷段，再不行退到热度最低的连续段
+- **冷启动**：没有历史时落在 `idle_target_hour`（默认 03:00）的固定窗口
+
+关掉 `use_idle_window_planner` 会回退成旧方案：
+`delay = min(base × multiplier^(penalty-1), cap)`，默认 30min / 1.5 / 1440min。
 
 ### 每轮做什么
 
-| 阶段           | 内容                                                       |
-| -------------- | ---------------------------------------------------------- |
-| 状态加载       | 从 `SubconsciousState` 表恢复 `total_runs` / 摘要窗口      |
-| 记忆限幅       | Core `ContextCompactor` 截断超限消息并生成摘要             |
-| ReAct 循环     | Agent 调用 `subconscious_*` 工具执行整理                   |
-| 后处理         | 更新全局 usage、持久化元状态、重置惩罚、调度下次运行       |
+| 阶段     | 内容                                                   |
+| -------- | ------------------------------------------------------ |
+| 取上下文 | Agent 第一步必须调 `subconscious_get_context`          |
+| 记忆限幅 | Core `ContextCompactor` 截断超限消息并生成摘要         |
+| ReAct    | Agent 调用 `subconscious_*` 工具执行整理               |
+| 后处理   | 更新全局 usage、持久化元状态、重置惩罚、规划下次窗口   |
+
+system prompt 只放不变量（角色、规则、质量口径、静态指南）。精确时间、距上轮间隔、
+上轮摘要、待审建议数、记忆库规模这些会变的东西全部通过 `subconscious_get_context`
+按需拉取 —— 这样同一天内渲染出的 system 逐字节一致，能吃到 provider 的前缀缓存，
+也不会让模型拿一个循环开头算出的快照当决策依据。
+
+Workflow 直接复用 Core 的 `REACT_ONLY`，不自建管线：`COMPACT_HISTORY` 节点在
+Agent Loop 前跑 `ContextCompactor`，压缩排在渲染之前，摘要才进得来。
+`SubconsciousRunner` 只是把 ChatObject 当数据容器，注入隔离的
+`SubconsciousBackend` 与 `ReActAgentStrategy`。
 
 ### 整理职责
 
 - **去重合并**：`subconscious_duplicate_helper` 返回待整理记忆 + 合并指导
-- **重要性校准**：评估每条记忆的 `low` / `medium` / `high`
-- **标签管理**：确保 tags 有意义且一致
-- **画像精炼**：`*_profile` 渐进式构建用户画像（行级增量更新）
+- **重要性校准 / 标签管理**：统一 `low` / `medium` / `high` 与 tags 口径
+- **画像精炼**：`*_profile` 行级增量维护用户画像
 - **知识沉淀**：把可迁移的经验写入全局知识库
 - **备忘录压缩**（L1 联动）：临近上限时把细节下放 L2
-
-### Workflow 管线
-
-```mermaid
-flowchart TD
-    LOAD_STATE --> NORMALIZE_MESSAGES --> COMPACT_HISTORY --> JINJA2_RENDER --> BUILD_MESSAGE --> REACT_BLOCK
-```
-
-`SubconsciousRunner` 把 ChatObject 当数据容器，注入自定义 `SubconsciousBackend`
-（隔离的工具 + memory 后端）与 Core `ReActAgentStrategy`。
-工作流直接复用 Core 内置的 `REACT_ONLY`，其中的 `COMPACT_HISTORY` 节点在 Agent
-Loop 前运行 Core `ContextCompactor`。压缩排在渲染之前，摘要才能进入本次请求的系统提示词。
 
 ---
 
@@ -342,53 +316,29 @@ fingerprint = sha256(protocol | model | base_url)
 
 检查在**插件 import 期**（同步）执行：
 
-```mermaid
-flowchart TD
-    A["插件加载"] --> B{"EMBED_CHECK_ON_STARTUP?"}
-    B -->|false| Z["跳过"]
-    B -->|true| C["Key 迁移（幂等，始终执行）"]
-    C --> D{"集合为空？"}
-    D -->|是| E["写入指纹，零打扰"]
-    D -->|否| F{"指纹一致？"}
-    F -->|是| Z
-    F -->|否| G{"EMBED_MISMATCH_POLICY"}
-    G -->|never| H["告警，保持现有数据"]
-    G -->|auto| K["全量重映射"]
-    G -->|ask| I{"stdin 是 TTY？"}
-    I -->|否| X["拒绝加载插件<br/>（Bot 继续运行，插件不可用）"]
-    I -->|是| Y["交互确认"]
-    Y -->|确认| K
-    Y -->|拒绝| H
-    K --> L["备份 JSON → 删集合 → 重建 → 分批重嵌入 → 写新指纹"]
-```
+1. `EMBED_CHECK_ON_STARTUP=false` → 跳过；否则先做一次幂等的 Key 迁移
+2. 集合为空 → 直接写入指纹，零打扰
+3. 指纹一致 → 什么都不做
+4. 指纹不一致 → 按 `EMBED_MISMATCH_POLICY`：
+   - `never`：告警，保持现有数据
+   - `auto`：备份 JSON → 删集合 → 重建 → 分批重嵌入 → 写新指纹
+   - `ask`：stdin 是 TTY 才交互确认；非交互环境拒绝加载插件，Bot 照常运行
 
 **重映射对维度变化天然免疫** —— 走"删集合 → 重建"路径，因此无需探测向量维度。
 
 **失败中断**：保留半成品集合 + 备份 + **不写新指纹**，下次启动重新提示（幂等重试）。
 
-### 配置
+相关变量见下方[环境变量](#环境变量env)。`ask` 策略在非交互环境（systemd / Docker）
+会拒绝加载插件，这类部署建议显式设 `EMBED_MISMATCH_POLICY`。
 
-| 环境变量                 | 默认值 | 说明                                                       |
-| ------------------------ | ------ | ---------------------------------------------------------- |
-| `EMBED_CHECK_ON_STARTUP` | `true` | 设为 `false` 跳过检查（排查 / 迁移期间临时使用）           |
-| `EMBED_MISMATCH_POLICY`  | `ask`  | `ask`=交互确认；`auto`=自动重映射；`never`=仅告警继续      |
-| `REEMBED_BATCH_SIZE`     | `64`   | 重映射时每批嵌入的文本条数                                 |
-| `REEMBED_BACKUP_KEEP`    | `3`    | 保留的历史备份份数                                         |
+### 已知限制与备份
 
-> `ask` 策略下，**非交互环境**（systemd / Docker）会拒绝加载插件并给出明确指引。
-> 这类部署建议显式设置 `EMBED_MISMATCH_POLICY`。
+模型名不变但服务端实际模型被换（ollama 同名 tag 更新）无法检测 —— 指纹只看配置，
+这种情况用 `ambot memory reindex` 手动强制重映射。
 
-### 已知限制
-
-**模型名不变但服务端实际模型被换**（如 ollama 同名 tag 更新）无法检测 ——
-指纹只看配置。此时用 `ambot memory reindex` 手动强制重映射。
-
-### 备份
-
-重映射前自动把集合全量内容落盘到 `data/amrita_plugin_memory/backups/embed_backup_<时间戳>.json`
-（ids + documents + metadatas）。这是"删集合重建"路径**唯一的回滚手段**。
-
-> 备份不含向量 —— 恢复时用**当前**模型重新嵌入，这正是恢复场景需要的。
+重映射前会把集合全量内容（ids + documents + metadatas）落盘到
+`backups/embed_backup_<时间戳>.json`，这是"删集合重建"路径唯一的回滚手段。
+备份不含向量，恢复时用**当前**模型重新嵌入 —— 这正是恢复场景需要的。
 
 ---
 
@@ -421,7 +371,7 @@ flowchart TD
 返回值与循环侧一致：`summary` + `content` 行窗口 + `total_lines` / `range_start` / `range_end`。
 画像写入仍只发生在循环内部，表层不开放。
 
-### 巩固循环工具（`rethinking/tools.py`，共 20 个）
+### 巩固循环工具（`rethinking/tools.py`，共 21 个 handler）
 
 记忆与 session/画像工具注册在隔离的 `_SUBCONSCIOUS_TOOLS` 上，不污染全局工具管理器。
 知识库的 `list`/`read`/`search` 双重注册：循环侧不受限，表层（对话 LLM）走
@@ -439,6 +389,7 @@ flowchart TD
 | `subconscious_send_to_user`      | 主动向用户发消息                       |
 | `subconscious_read_chat_context` | 读取最近聊天记录                       |
 | `subconscious_duplicate_helper`  | 去重辅助（返回记忆 + 合并指导 prompt） |
+| `subconscious_get_context`       | 一次性拉取本轮环境（时间 / 间隔 / 摘要 / 待审建议 / 库规模） |
 | `subconscious_get_memory_stats`  | 统计概览                               |
 | `subconscious_knowledge_list`    | 列出全局知识条目                       |
 | `subconscious_knowledge_read`    | 读取知识条目（支持行滑动）             |
@@ -458,19 +409,25 @@ flowchart TD
 ### 用户命令 `/memory`
 
 ```text
-/memory user list [页码]      — 分页列出个人记忆（每页10条）
-/memory user search <关键词>  — 搜索个人记忆
-/memory user delete <ID>      — 删除个人记忆
-/memory group list [页码]     — 分页列出群共享记忆
-/memory group search <关键词> — 搜索群共享记忆
-/memory group delete <ID>     — 删除群共享记忆（仅管理员 / 群主）
-/memory memo                  — 以合并转发查看当前作用域备忘录
-/memory dmn                   — 立即触发一轮潜意识调度（仅管理员，需 subconscious.enabled=true 且已配置 target_user_id）
+/memory user list [页码]      分页列出个人记忆（每页 10 条）
+/memory user search <关键词>  搜索个人记忆（top_k=10）
+/memory user delete <ID>      删除个人记忆
+/memory group list [页码]     分页列出群共享记忆
+/memory group search <关键词> 搜索群共享记忆
+/memory group delete <ID>     删除群共享记忆（仅管理员 / 群主）
+/memory memo                  以合并转发查看当前作用域备忘录
+/memory dmn                   立即触发一轮巩固循环
 ```
 
-`dmn`（别名 `run`、`触发`）属于隐藏选项：不出现在菜单与用法提示中，非管理员调用会按未知选项处理。鉴权顺序为超级用户白名单，其次 `lp.admin` 权限节点。
+`memo` 只读：查看谁都有权限，写入走工具。群里 `/memory memo` 看的是群备忘录，
+私聊看的是个人备忘录。
 
-兼容旧格式 `/memory list` 等（默认以个人范围执行）。
+`dmn`（别名 `run`、`触发`）是隐藏选项：不进菜单与 usage 提示，非管理员调用
+按未知选项处理。鉴权顺序为超级用户白名单，其次 `lp.admin` 权限节点。
+还需要 `subconscious.enabled = true` 且已配好 `target_user_id`。
+
+兼容旧格式 `/memory list` 等，默认以个人范围执行。群聊里 `user` 与 `group`
+两个范围都可用，私聊只有 `user`。
 
 ### 运维命令 `ambot memory`
 
@@ -498,9 +455,8 @@ flowchart TD
 | 存储             | 技术                                                         | 存什么                                                                                             |
 | ---------------- | ------------------------------------------------------------ | -------------------------------------------------------------------------------------------------- |
 | L1 备忘录        | `UserMemo` 表（插件自有 ORM，主键 = uni_id）                 | LLM 维护的常驻用户元信息（≤ `memo_max_chars`）                                                     |
-| 循环元状态       | `SubconsciousState` 表（插件自有 ORM，uid=`amrita_memory`）  | `total_runs`、`last_abstracts`、`pending_messages`、`knowledge_suggestions`                        |
+| 循环元状态       | `SubconsciousState` 表（插件自有 ORM，uid=`amrita_memory`）  | `total_runs`、`last_abstracts`、`pending_messages`、`knowledge_suggestions`、`penalty`、`idle_planner`（热度图）|
 | Session 摘要缓存 | `LRUCache[int, str]`（最大 128 条）                          | session DB id → LLM 生成的摘要文本，避免重复调用 `ContextCompactor`                                     |
-| 惩罚计数器       | 内存（不持久化）                                             | `_penalty_count`：重启后从 0 开始                                                                  |
 | L2 记忆          | ChromaDB `amrita_user_memory`                                | 向量 + documents + metadatas（含嵌入指纹与分区键版本）                                             |
 | 用户画像         | `data/amrita_plugin_memory/user_profile.md`                  | Markdown 文件，`summary---body` 格式，行级增量更新                                                 |
 | 全局知识库       | `data/amrita_plugin_memory/knowledge/` + `knowledge_index.json` + ChromaDB | 三方同步管理                                                                        |
@@ -520,43 +476,32 @@ flowchart TD
 
 ### 生命周期
 
-```mermaid
-flowchart TD
-    Startup["Bot 启动"] --> Check["run_startup_check()<br/>Key 迁移 + 嵌入指纹校验"]
-    Check --> Load["_load_state()<br/>恢复 total_runs / last_abstracts / pending_messages"]
-    Load --> KB["KnowledgeBaseManager<br/>init() + validate_on_startup()"]
-    KB --> Idle["进入空闲<br/>等待用户聊天触发"]
-    Idle -->|用户发消息| Cancel["cancel_and_reschedule()"]
-    Cancel -->|延迟到达| Run["_run() → _run_cycle() ReAct 循环"]
-    Run --> Save["_save_state()"]
-    Save --> Check2{"成功？"}
-    Check2 -->|Yes| Reset["reset_penalty()"]
-    Check2 -->|No| Keep["惩罚不重置<br/>（重试保护）"]
-    Reset --> Idle
-    Keep --> Idle
-```
+1. 启动：`run_startup_check()`（Key 迁移 + 指纹校验）→ `_load_state()`
+2. 初始化知识库（`enable_knowledge` 为假时跳过）→ 进入空闲
+3. 用户发消息：`cancel_and_reschedule()`，记一次热度观测、惩罚 +1、重挑窗口
+4. 窗口到达：`_run()` → `_run_cycle()` 跑一轮 ReAct
+5. 成功则 `reset_penalty()`，失败保留惩罚（重试保护），回到空闲
 
-**跨重启连续性**：`last_abstracts` 通过 Jinja2 模板 `{{ last_abstracts }}` / `{{ last_run }}`
-注入 prompt，让 Agent 知道"上一轮做了什么"。
+**跨重启连续性**：`penalty` 与 `idle_planner` 一起落在 `SubconsciousState.payload`，
+重启后接着用，不会把已经累积的退避和热度图丢掉。
 
-**惩罚计数器不持久化**：重启本身即一次完整"冷启动"，记忆整理结果已通过 ChromaDB 持久化，
-无需保留旧退避状态。
+**升级迁移**：旧版 penalty 语义是"被推迟的次数"，与新语义（要求的冷段长度）不可换算。
+启用空闲规划时若检测到 payload 里没有 `idle_planner` 键，清零一次并打日志。
+`payload` 只追加新键，旧版本读不到就忽略，不写迁移脚本。
 
 ---
 
 ## 技术栈
 
-| 组件       | 技术                                               |
-| ---------- | -------------------------------------------------- |
-| 后端框架   | Python 3.10+ / NoneBot2 / AmritaCore / AmritaSense |
-| 向量数据库 | ChromaDB（PersistentClient / HttpClient）          |
-| 嵌入模型   | OpenAI Embedding / Ollama Embedding                |
-| 调度引擎   | nonebot_plugin_apscheduler（date trigger）         |
-| 持久化     | nonebot_plugin_orm（插件自有模型 + 迁移链）        |
-| Token 统计 | InsightsModel（复用 Bot 全局 usage）               |
-| 缓存       | nonebot_plugin_amrita.cache.LRUCache               |
-| 配置管理   | Pydantic + TOML（插件配置）/ pydantic-settings（env） |
-| 代码质量   | Ruff + Pyright                                     |
+| 组件       | 技术                                                        |
+| ---------- | ----------------------------------------------------------- |
+| 运行时     | Python 3.11+ / NoneBot2 / AmritaCore                        |
+| 向量库     | ChromaDB（PersistentClient 或 HttpClient）                  |
+| 嵌入       | OpenAI Embedding / Ollama Embedding                         |
+| 调度       | nonebot_plugin_apscheduler（单次 date trigger + 周期 sweep） |
+| 持久化     | nonebot_plugin_orm（插件自有模型 + 迁移链）                 |
+| 配置       | Pydantic + uniconf（TOML）/ pydantic-settings（`.env`）      |
+| 质量       | Ruff + Pyright                                              |
 
 ---
 
@@ -566,7 +511,7 @@ flowchart TD
 
 ```toml
 # L2 记忆
-per_session_memory_limit = 50
+per_session_memory_limit = 100
 memo_max_chars = 1000
 
 # L2 时间记忆退化（软衰减 + 分层清理）
@@ -592,6 +537,14 @@ loop_detect_threshold = 3
 rethink_base_delay_minutes = 30
 rethink_penalty_multiplier = 1.5
 rethink_max_delay_minutes = 1440
+
+# 空闲窗口调度（关闭后回退到上面的固定延迟方案）
+use_idle_window_planner = true
+idle_timezone = "Asia/Shanghai"
+idle_target_hour = 3
+idle_base_slots = 3
+idle_max_slots = 6
+
 prompt_file = "prompt/subconscious_main.md.jinja2"
 prompt_send_file = "prompt/subconscious_send.md.jinja2"
 prompt_knowledge_file = "prompt/knowledge_guide.md.jinja2"
@@ -617,16 +570,16 @@ enable_knowledge = true
 | `decay.sweep_enabled`        | `true`  | 是否启用分层清理                            |
 | `decay.sweep_interval_hours` | `24`    | 分层清理周期（小时）                        |
 | `decay.sweep_batch_limit`    | `5000`  | 单次清理最多扫描的记忆条数                  |
-| `per_session_memory_limit`   | `50`    | 单个分区（uni_id）的记忆条数上限            |
+| `per_session_memory_limit`   | `100`   | 单个分区（uni_id）的记忆条数上限            |
 | `memo_max_chars`             | `1000`  | L1 备忘录字数硬上限                         |
-| `enabled`                    | `false` | 是否启用离线巩固循环                        |
+| `enabled`                    | `false` | 是否启用离线巩固循环（以下除 `decay.*` / `per_session_memory_limit` / `memo_max_chars` 外均在 `[subconscious]` 节） |
 | `target_user_id`             | `""`    | 目标用户 ID，为空则不启动                   |
 | `allowed_tools`              | `[]`    | 额外可用工具（从全局拉取，不存在仅告警）    |
 | `max_iterations`             | `10`    | 单轮 ReAct 最大步数（预留）                 |
 | `loop_detect_threshold`      | `3`     | 传入 Core `loop_reasoning_trigger`          |
-| `rethink_base_delay_minutes` | `30`    | 惩罚退避基数                                |
-| `rethink_penalty_multiplier` | `1.5`   | 惩罚指数倍率                                |
-| `rethink_max_delay_minutes`  | `1440`  | 惩罚延迟上限（1 天）                        |
+| `rethink_base_delay_minutes` | `30`    | 旧方案的延迟基数（仅 `use_idle_window_planner=false` 时生效） |
+| `rethink_penalty_multiplier` | `1.5`   | 旧方案的惩罚指数倍率                        |
+| `rethink_max_delay_minutes`  | `1440`  | 旧方案的延迟上限（1 天）                    |
 | `prompt_file`                | 见上    | 主推理提示词模板                            |
 | `prompt_send_file`           | 见上    | 主动消息生成模板                            |
 | `prompt_knowledge_file`      | 见上    | 知识库使用指南                              |
@@ -639,16 +592,23 @@ enable_knowledge = true
 | `knowledge_collection_name`  | `amrita_global_knowledge` | ChromaDB 知识库 collection |
 | `enable_knowledge`           | `true`  | 是否启用全局知识库（需 `enabled=true`）     |
 
+空闲窗口调度另有十余个调参项（各层衰减常数、冷槽阈值、收缩强度、buffer 与预估耗时），
+默认值见 `config.py` 的 `SubconsciousConfig`，一般不需要动；要动就照上面 toml 的写法加行。
+
 ### 提示词模板
 
 4 个 Jinja2 模板位于 `config/amrita_plugin_memory/prompt/`，首次缺失时自动从默认值创建：
 
-| 文件                          | 用途         | 变量                                                                                             |
-| ----------------------------- | ------------ | ------------------------------------------------------------------------------------------------ |
-| `subconscious_main.md.jinja2` | 主推理提示词 | `character_prompt`, `last_run`, `last_abstracts`, `current_time`, `target_user_id`, `total_runs` |
-| `subconscious_send.md.jinja2` | 主动消息生成 | `character_prompt`, `intent`, `memory_context`, `current_time`                                   |
-| `knowledge_guide.md.jinja2`   | 知识库指南   | `current_time`, `target_user_id`                                                                 |
-| `profile_guide.md.jinja2`     | 画像构建指南 | `current_time`, `target_user_id`                                                                 |
+| 文件                          | 用途         | 变量                                                     |
+| ----------------------------- | ------------ | -------------------------------------------------------- |
+| `subconscious_main.md.jinja2` | 主推理提示词 | `character_prompt`, `current_date`, `target_user_id`     |
+| `subconscious_send.md.jinja2` | 主动消息生成 | `character_prompt`, `intent`, `memory_context`, `current_time` |
+| `knowledge_guide.md.jinja2`   | 知识库指南   | `current_date`, `target_user_id`                         |
+| `profile_guide.md.jinja2`     | 画像构建指南 | `current_date`, `target_user_id`                         |
+
+主推理模板只接收不变量：`current_date` 是**日粒度**（`YYYY-MM-DD`，UTC），
+精确时间由 `subconscious_get_context` 提供。旧模板里写的 `{{ current_time }}`
+在指南文件中会被渲染成空串，不会原样漏进 system prompt。
 
 ### 环境变量（`.env`）
 
@@ -676,13 +636,18 @@ enable_knowledge = true
 
 ```
 amrita_plugin_memory/
+├── __init__.py                # 插件入口：启动检查、指纹失配的 startup 处理
 ├── config.py                  # 配置模型（SubconsciousConfig / ConfigFile / EnvConfig）
 ├── models.py                  # ORM 模型（UserMemo / SubconsciousState）
 ├── keys.py                    # L2 分区键（跟随框架 uni_id + 存量 Key 迁移）
 ├── embedding.py               # 嵌入指纹 / 全量重映射 / 备份 / 启动检查
 ├── cli.py                     # `ambot memory` 命令实现
 ├── memo.py                    # L1 备忘录（读取 / 写入 / 注入 hook）
-├── tools.py                   # 表层工具（write/read/update/delete/list/update_memo）
+├── tools.py                   # 表层工具（write/read/update/delete/list/memo/knowledge/profile）
+├── permissions.py             # 会话侧知识库读取授权（LP 节点 / 超级用户）
+├── profile_store.py           # 画像路径与 Markdown 解析（纯函数，不依赖运行时）
+├── decay.py                   # 时间记忆退化：软衰减重排 + 分层清理判定
+├── tasks.py                   # 分层清理的 APScheduler 周期任务
 ├── vector.py                  # ChromaDB 封装（AsyncUserMemory / 锁池）
 ├── embed.py                   # 嵌入适配器（Ollama）
 ├── matchers.py                # /memory 命令
@@ -696,8 +661,9 @@ amrita_plugin_memory/
     ├── backend.py             # SubconsciousBackend — 隔离的工具 + memory 后端
     ├── runner.py              # SubconsciousRunner — 核心编排器
     ├── hooks.py               # on_precompletion hook / 生命周期管理
-    ├── tools.py               # 20 个巩固循环工具 handler
-    ├── schemas.py             # FunctionDefinitionSchema 定义
+    ├── schedule.py            # 空闲窗口规划（纯数据 + 纯函数，唯一时区解析入口）
+    ├── tools.py               # 21 个巩固循环工具 handler
+    ├── schemas.py             # ToolFunctionSchema 定义
     └── knowledge.py           # KnowledgeBaseManager — 三方同步知识库
 
 config/amrita_plugin_memory/
@@ -715,52 +681,47 @@ data/amrita_plugin_memory/
 ## 开发
 
 ```bash
-uv sync                       # 安装依赖
-ruff check amrita_plugin_memory/   # 代码检查
-pyright amrita_plugin_memory/      # 类型检查
+uv sync                                              # 安装依赖
+uv run ruff check amrita_plugin_memory               # 代码检查
+uv run ruff format --check amrita_plugin_memory      # 格式检查
+uv run pyright --pythonpath .venv/bin/python amrita_plugin_memory   # 类型检查
 ```
+
+仓库 `.venv` 里通常没有 pyright / ruff，所以要用 `--pythonpath` 指向仓库环境，
+否则会因解析不到 amrita_core / chromadb 报一片假的 Import 错误。
+
+约定与模块边界见 `AGENTS.md`。本仓库**不写单元测试**：验证以 ruff、pyright
+零 error 加手动冒烟为准，纯逻辑写成可独立执行的形式，用临时脚本验证后不提交。
 
 ### ORM 迁移
 
-迁移由 **`ambot orm`** 生成（不要用 `nb orm` —— 它不会加载 Amrita 插件，
-我们的模型会被漏掉）：
+用 **`ambot orm`** 生成迁移，不要用 `nb orm`（它不加载 Amrita 插件，我们的模型会被漏掉）：
 
 ```bash
-uv run ambot orm upgrade                       # 1. 数据库先到 heads
-uv run ambot orm revision -m "描述" \
-    --branch-label amrita_plugin_memory        # 2. 生成迁移
-uv run ambot orm upgrade                       # 3. 应用
-uv run ambot orm check                         # 4. 校验模型与库一致
+uv run ambot orm revision -m "描述" --branch-label amrita_plugin_memory
+uv run ambot orm upgrade && uv run ambot orm check
 ```
 
-生成的脚本会落到工作区 `migrations/versions/amrita_plugin_memory/`，
-需手动移入包内 `amrita_plugin_memory/migrations/` 才能随包分发。
+脚本落在工作区 `migrations/versions/amrita_plugin_memory/`，
+要手动移进包内 `amrita_plugin_memory/migrations/` 才随包分发。
 
 ### `ambot memory` 命令
 
-命令组定义在本插件的 `amrita_plugin_memory/cli.py`，通过 entry point 暴露给
-`ambot`：
+命令组在 `cli.py`，靠 entry point 暴露：
 
 ```toml
 [project.entry-points."ambot.commands"]
 memory = "amrita_plugin_memory.cli:memory [full_load]"
 ```
 
-`[full_load]` 是 `ambot-inlinectl` 提供的 entry point 元信息（需带该支持的
-版本）。本插件包在插件加载器之外无法 import（`__init__.py` 里的
-`require(...)` 需要加载器上下文），因此
-`ambot` 会在**命令真正被调用时**先 `amrita.init()` + `amrita.load_plugins()`，
-再加载该命令；列表/帮助阶段只读 entry point 元信息，不触发加载 ——
-`ambot --help` 不会因此变慢，插件坏了也不影响其它命令。
+本插件包在加载器之外无法 import，所以 `ambot` 只在**命令真正被调用时**才
+`amrita.init()` + `load_plugins()`；`--help` 阶段仅读元信息，不触发加载。
+自举时会写 `AMBOT_COMMAND_CONTEXT=1`，插件据此跳过启动检查，
+否则指纹确认会反过来挡住维护命令本身。
 
-自举时 `ambot` 会写入 `AMBOT_COMMAND_CONTEXT=1`，插件据此跳过启动检查，
-否则嵌入指纹确认会反过来挡住维护命令本身。
-
-调试时把 ambot-inlinectl 以可编辑方式装入当前环境即可：
+调试时装可编辑版本（`uv run` 会按 `uv.lock` 重同步并冲掉它，故加 `--no-sync`）：
 
 ```bash
 uv pip install -e <ambot-inlinectl 仓库路径>
 uv run --no-sync ambot memory status
 ```
-
-> `uv run` 会按 `uv.lock` 重新同步环境并冲掉可编辑安装，因此需加 `--no-sync`。
