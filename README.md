@@ -89,256 +89,62 @@ ambot memory status      # 查看嵌入指纹、记忆分布与备份
 
 ## 三层记忆模型
 
-数据流向：LLM 用 `update_memo` 整篇改写 L1；L1 临近上限时把细节下放到 L2；
-L3 在空闲窗口里读 L2 与归档 session，做去重与精炼，顺带维护知识库和画像。
-L3 的元状态（含惩罚计数与热度图）单独存在 `SubconsciousState`。
-
-### L1 与 `extra_prompt` 的正交性
-
-两者都会注入 system prompt，但来源、作者与优先级完全不同：
-
-|          | `extra_prompt`                     | L1 备忘录                          |
-| -------- | ---------------------------------- | ---------------------------------- |
-| 作者     | **用户**逐字指定（`/prompt` 命令） | **LLM** 规范化提取                 |
-| 管理方式 | 用户自己增删改                     | LLM 自主维护                       |
-| 注入形态 | `<EXTRA>` 规则块，**冲突时忽略**   | `<MEMO>` 事实块，作为可信背景      |
-| 语义     | 用户想要的行为指令                 | LLM 学到的关于该主体的元信息       |
-
-插件**不会**读写 `extra_prompt` —— 那是用户的领地。
-
-### 命名对照表
-
-L3 在代码中沿用历史标识符 `subconscious` / `rethinking`（避免破坏性变更），
-文档统一表述为"离线巩固循环"，其行为与神经科学的**默认模式网络（DMN）**高度对应：
-
-| 代码标识符                          | DMN 对应特征                |
-| ----------------------------------- | --------------------------- |
-| `rethinking/` / `subconscious_*`     | 离线巩固循环、巩固循环工具  |
-| 用户聊天 → `cancel_and_reschedule`   | 任务负激活：专注时 DMN 被抑制 |
-| 空闲窗口到达 → `_run`                | DMN 在无任务时活跃          |
-| 去重 / `ContextCompactor`            | 海马 → 皮层的系统巩固       |
-| 画像构建（`*_profile`）              | 自传体记忆                  |
-| 主动消息（`send_to_user`）           | 心智游移                    |
-
-> 它**不是**弗洛伊德式的"潜意识"：触发确定性、工具显式、日志完整、输入输出全透明。
-> 它也不是"常驻循环"——而是**事件驱动的单次任务**，跑完即空闲；用户聊天越频繁，它跑得越少。
-
----
+L1 是每轮注入的一段千字内元信息，LLM 用 `update_memo` 整篇改写；L2 是 ChromaDB 长尾事实库，
+按需检索；L3 在空闲窗口里读 L2 与归档 session，做去重、精炼、画像与知识沉淀。
+L1 临近上限时把细节下放到 L2，只留指针。
 
 ## L1 备忘录
 
-**定位**：每次对话都要用到的恒常信息 —— 身份（名字 / 证件 / 电话）、稳定偏好、
-**用户要求的工具调用模式**。类比人类恒常激活的持久记忆。
+`memo_max_chars`（默认 1000）是硬上限，所以主力写入是整篇替换：读当前 memo、融合新事实、
+输出全文、服务端校验长度后落库。超长时工具拒绝写入并返回当前字数，由 LLM 自己压缩重试。
 
-### 关键约束：严格字数上限
+放身份、稳定偏好、用户指定的工具调用模式；具体事件与项目细节放 L2。只写陈述性事实，
+不写祈使句规则 —— 那是 `extra_prompt` 的地盘，插件不读也不写它。
 
-`memo_max_chars`（默认 **1000** 字）是**硬上限**。因此主力写入原语是**整篇替换**：
-`append_memo` 只是省事用的追加入口，最终仍受同一个字数校验约束。
+表是 `amrita_plugin_memory_user_memo`，主键为框架 uni_id，个人与群各占一行。
+注入走 `on_precompletion`（priority=15），与 L3 解耦：私聊注入个人 memo，
+群聊只注入群 memo（不含发言人的个人 memo），空 memo 不注入。
 
-`update_memo` 的语义是：
-
-```text
-LLM 读当前 memo → 融合新事实 → 输出新全文 → 服务端校验长度 → 落库
-```
-
-超长时工具**拒绝写入**并返回当前字数，由 LLM 自行压缩后重试。
-
-### 内容规范
-
-| 该放 L1                     | 该放 L2                         |
-| --------------------------- | ------------------------------- |
-| 身份信息、稳定偏好          | 具体事件、长尾偏好              |
-| 用户要求的工具调用模式      | 项目细节、讨论记录              |
-| 当前活跃上下文（高度浓缩）  | 任何不需要每轮都看到的内容      |
-
-写入指南（写进 L3 的提示词）：
-
-- 只写**陈述性事实**，不写祈使句规则（规则属于 `extra_prompt`）
-- 内部按 `身份 > 偏好 > 工具模式 > 近期上下文` 排序，压缩时从尾部开始丢
-- 临近上限时，细节应**下放 L2**，memo 只留指针（如"用户有 3 个项目"）
-
-### 存储与注入
-
-- **表**：`amrita_plugin_memory_user_memo`，主键 `user_id` = 框架 uni_id
-- **群与个人是同一张表的不同行**：
-  - `QQPlatform_Private_{qq}` / `user_{qq}` → 个人备忘录
-  - `QQPlatform_Group_{群号}` / `group_{群号}` → 群备忘录
-- **注入**：`on_precompletion` hook（priority=15），与 L3 **完全解耦**（L3 关闭时 L1 照常工作）
-  - 私聊 → 注入个人 memo
-  - **群聊 → 只注入群 memo**（发言人的个人 memo 不注入，避免隐私外泄）
-  - 空 memo 不注入，行为自然降级
-- **缓存**：进程内 `LRUCache(128)`，写入时穿透失效
-
-### 工具
-
-| 工具          | 说明                                       |
-| ------------- | ------------------------------------------ |
-| `read_memo`   | 读取当前作用域备忘录全文                   |
-| `append_memo` | 在末尾追加一段，不覆盖已有条目             |
-| `update_memo` | 整篇替换，超长则拒绝，返回当前字数         |
-
----
+工具三个：`read_memo`、`append_memo`（末尾追加）、`update_memo`（整篇替换）。
 
 ## L2 向量记忆层
 
-**定位**：长尾事实库 —— 只在需要时检索，不常驻。类比需要线索提取的语义记忆。
+`scope` 表达语义，与分区键是两个维度：
 
-### 分区键（uni_id）
+| `scope` | 含义                       | 可用场景 |
+| ------- | -------------------------- | -------- |
+| `user`  | 个人专属（群聊私聊互通）   | 任意     |
+| `group` | 群共享（群内所有人可见）   | 仅群聊   |
 
-分区键**跟随已安装 Amrita 的会话 ID 格式**（`amrita.plugins.chat.utils.sql.make_uni_id`）：
+分区键跟随 Amrita 的 `make_uni_id`（旧版 `user_{qq}`，新版 `QQPlatform_Private_{qq}`），
+插件不硬编码，升级后自动跟随；存量 Key 由启动检查幂等迁移。
 
-旧版是 `user_{qq}` / `group_{群号}`，新版换成
-`QQPlatform_Private_{qq}` / `QQPlatform_Group_{群号}`。插件不硬编码任何一种，
-而是委托框架的 `make_uni_id` 生成，Amrita 升级后自动跟随；存量 Key 由启动检查幂等迁移。
+每条记忆带 `user_id` / `scope` / `tags` / `importance` / `created_at`，检索支持 `top_k`
+与 `importance` 过滤，结果附带距离（ChromaDB 默认 l2，越小越相似）。
 
-`scope` 参数表达语义，与 uni_id 类型是两个维度：
-
-| `scope` | 含义                       | 可用场景   |
-| ------- | -------------------------- | ---------- |
-| `user`  | 个人专属（群聊私聊互通）   | 任意       |
-| `group` | 群共享（群内所有人可见）   | 仅群聊     |
-
-### 记忆元数据
-
-每条记忆带 `user_id` / `scope` / `tags` / `importance` / `created_at`。
-`importance` 分 `low` / `medium` / `high`，可在检索时作为过滤条件。
-检索时额外回填 `decay_score`（时间退化得分），不参与过滤。
-
-### 检索
-
-`read_memory` 用嵌入向量做相似度搜索，支持 `top_k` 与 `importance` 过滤。
-删除群共享记忆需管理员或群主权限。
-
-检索结果附带**距离**（`distances`）——ChromaDB 默认使用 `l2`（平方欧氏距离）空间，
-因此**数值越小越相似**（完全相同的向量为 `0`）。`/memory user search` 输出中的
-"距离"即此值。
-
-> 距离是原始度量而非归一化相似度：`l2` 空间下其取值范围取决于向量是否归一化，
-> 因此不要跨模型比较绝对值，只用于同一查询内的相对排序。
-
-### 时间记忆退化（软衰减 + 分层清理）
-
-记忆不是永久等权 —— 越旧权重越低，超龄则逐级退化直至清理。分两段实现：
-
-**软衰减（检索期）**：`query_notes` 先多取 `overfetch` 倍候选，再按
-
-$$\text{score} = \frac{1}{1 + d} \times \max\left(0.5^{\,\text{age} / \text{half-life}},\ \text{floor}\right)$$
-
-重排后截回 `top_k`。半衰期随 `importance` 放大：`low` 为 `half_life_days`，
-`medium` 为 `1+boost` 倍，`high` 为 `1+2·boost` 倍。得分回填到元数据的
-`decay_score` 字段，便于排查。这一步**只重排、不删数据**。
-
-**硬分层（清理期）**：每条记忆按 `importance` 有一条寿命阈值 ——
-`low` = `short_term_days`、`high` = `long_term_days`、`medium` 取两者几何中值。
-后台任务按 `sweep_interval_hours` 扫描，超龄先 `high → medium → low` 逐级降级，
-降到 `low` 仍超龄才删除。降级只改 `importance`，不重新嵌入。
-
-| 动作     | 触发条件           | 效果                |
-| -------- | ------------------ | ------------------- |
-| `keep`   | `age ≤ 当前层阈值` | 不动                |
-| `demote` | 超龄且非 `low`     | `importance` 降一级 |
-| `purge`  | 超龄且已是 `low`   | 删除该条            |
-
-`created_at` 缺失或不可解析时按 `keep` 处理，避免误删。
-软衰减与分层清理都受 `[decay].enabled` 总开关控制。
-
----
+时间退化分两段：检索期按 `1/(1+d) × max(0.5^(age/half_life), floor)` 重排后截回 `top_k`
+（只重排不删）；清理期按 importance 的寿命阈值扫描，超龄先降级，降到 `low` 仍超龄才删除。
+两段都受 `[decay].enabled` 控制。
 
 ## L3 离线巩固循环（DMN）
 
-### 触发：事件驱动 + 空闲窗口规划
+复用 Core 的 `REACT_ONLY`，`SubconsciousRunner` 只注入隔离的 `SubconsciousBackend`
+与 `ReActAgentStrategy`。每轮第一件事必须调 `subconscious_get_context`（精确时间、
+距上轮间隔、上轮摘要、待审建议、库规模），system prompt 因此只放不变量 ——
+同一天内逐字节一致，能吃到 provider 的前缀缓存。
 
-**不使用定时自循环** —— 只有目标用户发消息才会推一次计划。
+触发不用定时自循环：用户发消息就给所在时槽加一次热度、惩罚 +1、重挑窗口。
+默认按 7 天 × 12 槽的热度图找冷段，`penalty` 的含义是"要求多长的冷段"而非延迟分钟数；
+没有历史时落在 `idle_target_hour`。关掉 `use_idle_window_planner` 回退成固定指数退避。
 
-用户每次聊天 → 取消当前计划 → 惩罚计数 +1 → 按新的门槛重新挑窗口。
-推理成功后惩罚重置为 0；用户聊得越频繁，要求的冷段越长（**任务负激活**）。
-
-默认走空闲窗口规划（`use_idle_window_planner = true`），由 `rethinking/schedule.py`
-算出一个具体的本地时间窗：
-
-- **热度图**：7 天 × 12 槽（2h），消息给所在槽 +1，全局层 τ=14 天、单片星期几层 τ=28 天
-- **分层**：fine（单片星期几）/ mid（工作日-周末）/ coarse（全局），按活跃天数逐级降级
-- **冷槽**：占比 ≤ 5% 且原始计数 ≤ 1；冷段环形扫描，跨零点的 22:00–08:00 不被切断
-- **细化**：段内回到原始时间戳，合并连发噪声后二分求上界，扣 buffer 与预估耗时
-- **penalty 语义**：是"要求多长的冷段"，不是"推迟多少分钟" —— `3 槽 × 1.5^(n-1)`
-  封顶 6 槽，不足就减半放宽三次，仍不足取最长冷段，再不行退到热度最低的连续段
-- **冷启动**：没有历史时落在 `idle_target_hour`（默认 03:00）的固定窗口
-
-关掉 `use_idle_window_planner` 会回退成旧方案：
-`delay = min(base × multiplier^(penalty-1), cap)`，默认 30min / 1.5 / 1440min。
-
-### 每轮做什么
-
-| 阶段     | 内容                                                   |
-| -------- | ------------------------------------------------------ |
-| 取上下文 | Agent 第一步必须调 `subconscious_get_context`          |
-| 记忆限幅 | Core `ContextCompactor` 截断超限消息并生成摘要         |
-| ReAct    | Agent 调用 `subconscious_*` 工具执行整理               |
-| 后处理   | 更新全局 usage、持久化元状态、重置惩罚、规划下次窗口   |
-
-system prompt 只放不变量（角色、规则、质量口径、静态指南）。精确时间、距上轮间隔、
-上轮摘要、待审建议数、记忆库规模这些会变的东西全部通过 `subconscious_get_context`
-按需拉取 —— 这样同一天内渲染出的 system 逐字节一致，能吃到 provider 的前缀缓存，
-也不会让模型拿一个循环开头算出的快照当决策依据。
-
-Workflow 直接复用 Core 的 `REACT_ONLY`，不自建管线：`COMPACT_HISTORY` 节点在
-Agent Loop 前跑 `ContextCompactor`，压缩排在渲染之前，摘要才进得来。
-`SubconsciousRunner` 只是把 ChatObject 当数据容器，注入隔离的
-`SubconsciousBackend` 与 `ReActAgentStrategy`。
-
-### 整理职责
-
-- **去重合并**：`subconscious_duplicate_helper` 返回待整理记忆 + 合并指导
-- **重要性校准 / 标签管理**：统一 `low` / `medium` / `high` 与 tags 口径
-- **画像精炼**：`*_profile` 行级增量维护用户画像
-- **知识沉淀**：把可迁移的经验写入全局知识库
-- **备忘录压缩**（L1 联动）：临近上限时把细节下放 L2
-
----
+整理职责：去重合并、重要性校准与标签统一、画像精炼、知识沉淀、临近上限时压缩 L1。
 
 ## 嵌入模型与重映射
 
-### 为什么需要指纹
-
-向量只有在**同一嵌入模型**下才可比。更换模型（`nomic-embed-text` → `bge-m3`）
-甚至只是服务端同名模型被更新，旧向量都会退化为噪声 —— 但 ChromaDB 不会报错，
-检索结果会静默劣化。
-
-因此插件在集合 metadata 中记录**嵌入配置指纹**：
-
-```
-fingerprint = sha256(protocol | model | base_url)
-```
-
-随库走（远程 Chroma 同样生效），并在**每次启动**校验。
-
-### 启动检查流程
-
-检查在**插件 import 期**（同步）执行：
-
-1. `EMBED_CHECK_ON_STARTUP=false` → 跳过；否则先做一次幂等的 Key 迁移
-2. 集合为空 → 直接写入指纹，零打扰
-3. 指纹一致 → 什么都不做
-4. 指纹不一致 → 按 `EMBED_MISMATCH_POLICY`：
-   - `never`：告警，保持现有数据
-   - `auto`：备份 JSON → 删集合 → 重建 → 分批重嵌入 → 写新指纹
-   - `ask`：stdin 是 TTY 才交互确认；非交互环境拒绝加载插件，Bot 照常运行
-
-**重映射对维度变化天然免疫** —— 走"删集合 → 重建"路径，因此无需探测向量维度。
-
-**失败中断**：保留半成品集合 + 备份 + **不写新指纹**，下次启动重新提示（幂等重试）。
-
-相关变量见下方[环境变量](#环境变量env)。`ask` 策略在非交互环境（systemd / Docker）
-会拒绝加载插件，这类部署建议显式设 `EMBED_MISMATCH_POLICY`。
-
-### 已知限制与备份
-
-模型名不变但服务端实际模型被换（ollama 同名 tag 更新）无法检测 —— 指纹只看配置，
-这种情况用 `ambot memory reindex` 手动强制重映射。
-
-重映射前会把集合全量内容（ids + documents + metadatas）落盘到
-`backups/embed_backup_<时间戳>.json`，这是"删集合重建"路径唯一的回滚手段。
-备份不含向量，恢复时用**当前**模型重新嵌入 —— 这正是恢复场景需要的。
+向量只在同一模型下可比，换模型会让旧向量静默劣化且不报错。插件在集合 metadata 里记
+`sha256(protocol|model|base_url)`，每次启动校验；不一致时按 `EMBED_MISMATCH_POLICY`
+处理：`auto` 备份后删集合重建重嵌，`ask` 交互确认（非 TTY 拒绝加载插件），`never` 仅告警。
+指纹只看配置，同名模型被服务端换掉检测不到，用 `ambot memory reindex` 手动处理。
 
 ---
 
@@ -464,15 +270,10 @@ fingerprint = sha256(protocol | model | base_url)
 
 ### ORM 与迁移
 
-插件使用 `nonebot_plugin_orm`，自带迁移链：
+使用 `nonebot_plugin_orm`，两条迁移：`21f55abc2b90` 建 `UserMemo`、
+`6004d221a7de` 建 `SubconsciousState`。迁移随包分发，`depends_on` 指向
+`nonebot_plugin_amrita` 的初始迁移，保证外键有效。
 
-| revision         | 内容                          |
-| ---------------- | ----------------------------- |
-| `21f55abc2b90`   | `UserMemo` 表（分支根，`depends_on=072361e8936f`） |
-| `6004d221a7de`   | `SubconsciousState` 表        |
-
-迁移随包分发（`amrita_plugin_memory/migrations/`），并**依赖 Bot 的迁移链**
-（`depends_on` 指向 `nonebot_plugin_amrita` 的初始迁移），保证外键引用有效。
 
 ### 生命周期
 
@@ -493,15 +294,9 @@ fingerprint = sha256(protocol | model | base_url)
 
 ## 技术栈
 
-| 组件       | 技术                                                        |
-| ---------- | ----------------------------------------------------------- |
-| 运行时     | Python 3.11+ / NoneBot2 / AmritaCore                        |
-| 向量库     | ChromaDB（PersistentClient 或 HttpClient）                  |
-| 嵌入       | OpenAI Embedding / Ollama Embedding                         |
-| 调度       | nonebot_plugin_apscheduler（单次 date trigger + 周期 sweep） |
-| 持久化     | nonebot_plugin_orm（插件自有模型 + 迁移链）                 |
-| 配置       | Pydantic + uniconf（TOML）/ pydantic-settings（`.env`）      |
-| 质量       | Ruff + Pyright                                              |
+Python 3.11+ / NoneBot2 / AmritaCore，向量库 ChromaDB，嵌入走 OpenAI 或 Ollama，
+调度 nonebot_plugin_apscheduler，持久化 nonebot_plugin_orm，配置 Pydantic + uniconf。
+
 
 ---
 
