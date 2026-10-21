@@ -410,10 +410,16 @@ flowchart TD
 | `knowledge_read`    | kid, start_line?, end_line?                   |
 | `knowledge_search`  | query, top_k?                                 |
 | `knowledge_suggest` | action, title, summary, body, reason          |
+| `read_profile`      | start_line?, end_line?                        |
 
 知识库的三个只读工具 `knowledge_list` / `knowledge_read` / `knowledge_search`
 需要 LP 权限节点 `memory.knowledge`；`lp.admin` 与 `.env` 里的超级用户始终持有。
 未授权时工具返回错误 JSON，不返回任何知识内容。
+
+用户画像的只读工具 `read_profile` 走另一条口径：只对离线巩固循环的目标用户
+（`subconscious.target_user_id`）开放，且只能读自己那份画像，不占用权限节点。
+返回值与循环侧一致：`summary` + `content` 行窗口 + `total_lines` / `range_start` / `range_end`。
+画像写入仍只发生在循环内部，表层不开放。
 
 ### 巩固循环工具（`rethinking/tools.py`，共 20 个）
 

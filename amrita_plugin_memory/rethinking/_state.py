@@ -18,6 +18,13 @@ _pending_messages: list[PendingMsg] = []
 _penalty_count: int = 0
 # 知识建议队列 — 对话 LLM 提议创建/更新知识，潜意识 Agent 下一轮审查
 _knowledge_suggestions: list[dict[str, str]] = []
+# 上一轮 iter_stop 的摘要与结束时间 — 供 subconscious_get_context 读取
+_last_iter_summary: str = ""
+_last_run_at: float = 0.0
+# 本轮是否已调过 subconscious_get_context — iter_stop 据此判定周期是否有效
+_context_fetched: bool = False
+# 本轮是否算一次有效周期 — 空转的周期不重置惩罚
+_cycle_valid: bool = True
 # 隔离的工具管理器 — 所有 @on_tools 装饰器通过 bound_to 注册到这里，不污染全局 ToolsManager
 _SUBCONSCIOUS_TOOLS = MultiToolsManager()
 
@@ -89,3 +96,49 @@ def set_knowledge_suggestions(suggestions: list[dict[str, str]]) -> None:
 def add_knowledge_suggestion(suggestion: dict[str, str]) -> None:
     global _knowledge_suggestions
     _knowledge_suggestions.append(suggestion)
+
+
+def get_last_iter_summary() -> str:
+    return _last_iter_summary
+
+
+def set_last_iter_summary(text: str) -> None:
+    global _last_iter_summary
+    _last_iter_summary = text
+
+
+def mark_context_fetched() -> None:
+    global _context_fetched
+    _context_fetched = True
+
+
+def is_context_fetched() -> bool:
+    return _context_fetched
+
+
+def reset_context_fetched() -> None:
+    global _context_fetched
+    _context_fetched = False
+
+
+def mark_cycle_invalid() -> None:
+    global _cycle_valid
+    _cycle_valid = False
+
+
+def is_cycle_valid() -> bool:
+    return _cycle_valid
+
+
+def reset_cycle_valid() -> None:
+    global _cycle_valid
+    _cycle_valid = True
+
+
+def get_last_run_at() -> float:
+    return _last_run_at
+
+
+def set_last_run_at(ts: float) -> None:
+    global _last_run_at
+    _last_run_at = ts

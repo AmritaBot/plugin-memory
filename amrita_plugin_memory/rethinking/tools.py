@@ -20,13 +20,20 @@ from jinja2 import Template
 from nonebot import logger
 
 from ..keys import make_scope_id
-from ..permissions import can_read_knowledge, get_event_from_tool_ctx
+from ..permissions import (
+    can_read_knowledge,
+    can_read_profile,
+    get_event_from_tool_ctx,
+)
+from ..profile_store import PROFILE_PATH, read_profile
 from ..vector import AsyncUserMemory, MemoryMetadata, get_db_conn
 from . import _state
 from .consts import DEFAULT_SEND_PROMPT, ensure_prompt_file, load_character_prompt
+from .schedule import resolve_timezone
 from .schemas import (
     DELETE_MEMORY_SCHEMA,
     DUPLICATE_HELPER_SCHEMA,
+    GET_CONTEXT_SCHEMA,
     GET_MEMORY_STATS_SCHEMA,
     GET_PROFILE_SCHEMA,
     ITER_STOP_SCHEMA,
@@ -40,6 +47,7 @@ from .schemas import (
     LIST_MEMORY_SCHEMA,
     READ_CHAT_CONTEXT_SCHEMA,
     READ_MEMORY_SCHEMA,
+    READ_PROFILE_SCHEMA,
     READ_SESSIONS_SCHEMA,
     READ_SUGGESTIONS_SCHEMA,
     SEND_TO_USER_SCHEMA,
@@ -56,6 +64,9 @@ except ImportError:
 #: duplicate_helper 单次返回的记忆条数默认值 / 上限
 _DUPLICATE_DEFAULT_LIMIT = 40
 _DUPLICATE_MAX_LIMIT = 200
+
+#: get_context 里向量库操作的超时上限（秒），超时只标 stale 不阻塞循环
+_CONTEXT_DB_TIMEOUT = 8.0
 
 _SUBCONSCIOUS_TOOLS = _state.get_tools_manager()
 
@@ -241,9 +252,18 @@ async def subconscious_list_memory(data: dict[str, Any]) -> str:
 
 @on_tools(ITER_STOP_SCHEMA, strict=True, bound_to=_SUBCONSCIOUS_TOOLS)
 async def subconscious_iter_stop(data: dict[str, Any]) -> str:
-    logger.info(
-        f"[Subconscious] iter_stop: summary={str(data.get('summary', ''))[:80]}"
-    )
+    summary = str(data.get("summary", ""))
+    if not _state.is_context_fetched():
+        # 没取环境就收工：周期算无效，不写摘要。惩罚保持不清零，
+        # 下一次调度仍带着这轮攒的量，避免"空转一轮还被当成完成"
+        logger.warning("[Subconscious] iter_stop without get_context, cycle invalid")
+        _state.mark_cycle_invalid()
+        return _tools_err(
+            "本轮未调用 subconscious_get_context，周期无效。"
+            "请先取当前环境再决定是否整理记忆"
+        )
+    _state.set_last_iter_summary(summary)
+    logger.info(f"[Subconscious] iter_stop: summary={summary[:80]}")
     return json.dumps(
         {"status": "acknowledged", "message": "推理循环已确认结束"}, ensure_ascii=False
     )
@@ -580,6 +600,95 @@ async def subconscious_duplicate_helper(data: dict[str, Any]) -> str:
         return _tools_err(str(e))
 
 
+@on_tools(GET_CONTEXT_SCHEMA, strict=True, bound_to=_SUBCONSCIOUS_TOOLS)
+async def subconscious_get_context(data: dict[str, Any]) -> str:
+    """聚合本轮运行环境；单项失败只标 stale，不中断。"""
+    stale: list[str] = []
+    runner = _state.get_runner()
+    cfg = runner._config if runner is not None else None
+
+    tz_cfg = getattr(cfg, "idle_timezone", "Asia/Shanghai") if cfg else "Asia/Shanghai"
+    # 与调度侧共用同一份解析，避免规划窗口与回报钟点分处两个时区
+    tz, tz_name, tz_fell_back = resolve_timezone(tz_cfg)
+    if tz_fell_back:
+        stale.append("timezone")
+
+    now = datetime.now(timezone.utc)
+    local = now.astimezone(tz)
+
+    last_at = _state.get_last_run_at()
+    if last_at > 0:
+        gap_minutes = int((now.timestamp() - last_at) // 60)
+        last_run_iso = datetime.fromtimestamp(last_at, tz).isoformat()
+    else:
+        gap_minutes = None
+        last_run_iso = None
+
+    suggested = _state.get_knowledge_suggestions()
+
+    total = None
+    low_count = None
+    threshold = None
+    memory_hint = ""
+    try:
+        ope = _make_operator()
+        await asyncio.wait_for(ope.init(), timeout=_CONTEXT_DB_TIMEOUT)
+        pid = _get_partition_id()
+        total = await asyncio.wait_for(
+            ope.count_user_notes(pid), timeout=_CONTEXT_DB_TIMEOUT
+        )
+        threshold = getattr(cfg, "memory_warn_threshold", 100) if cfg else 100
+        if total > threshold:
+            result = await asyncio.wait_for(
+                ope.get_all_notes(pid, include=["metadatas"]),
+                timeout=_CONTEXT_DB_TIMEOUT,
+            )
+            low_count = sum(
+                1
+                for m in (result.get("metadatas") or [])
+                if isinstance(m, dict) and m.get("importance") == "low"
+            )
+            memory_hint = (
+                f"记忆库已有 {total} 条（低重要性 {low_count} 条），"
+                "建议本轮优先用 subconscious_duplicate_helper 整理合并。"
+            )
+    except Exception as e:
+        logger.warning(f"[Subconscious] get_context memory stats failed: {e}")
+        stale.append("memory_stats")
+
+    plan_info = None
+    try:
+        if runner is not None and getattr(runner, "_planner", None) is not None:
+            plan_info = runner._planner.last_plan_dict()
+    except Exception:
+        stale.append("idle_plan")
+
+    _state.mark_context_fetched()
+    return json.dumps(
+        {
+            "status": "success",
+            "now": local.strftime("%Y-%m-%d %H:%M:%S"),
+            "timezone": tz_name,
+            "timezone_fallback": tz_fell_back,
+            "weekday": local.strftime("%A"),
+            "last_run_at": last_run_iso,
+            "minutes_since_last_run": gap_minutes,
+            "last_run_summary": _state.get_last_iter_summary() or None,
+            "pending_knowledge_suggestions": {
+                "count": len(suggested),
+                "ids": [s.get("kid") or s.get("title") or "?" for s in suggested][:20],
+            },
+            "memory_total": total,
+            "memory_low_importance": low_count,
+            "memory_warn_threshold": threshold,
+            "memory_hint": memory_hint,
+            "idle_plan": plan_info,
+            "stale": stale,
+        },
+        ensure_ascii=False,
+    )
+
+
 @on_tools(GET_MEMORY_STATS_SCHEMA, strict=True, bound_to=_SUBCONSCIOUS_TOOLS)
 async def subconscious_get_memory_stats(data: dict[str, Any]) -> str:
     """返回记忆库统计概览。"""
@@ -805,6 +914,32 @@ async def knowledge_search_authorized(ctx: ToolContext) -> str | None:
     if not await can_read_knowledge(get_event_from_tool_ctx(ctx)):
         return _deny_knowledge()
     return await subconscious_knowledge_search(ctx.data)
+
+
+# 会话侧只读入口：用户画像，仅画像所有者（DMN 目标用户）可读
+
+
+def _deny_profile() -> str:
+    return _tools_err("无权限读取该画像（仅离线巩固循环的目标用户可读自己的画像）")
+
+
+@on_tools(READ_PROFILE_SCHEMA, strict=True, custom_run=True)
+async def read_profile_authorized(ctx: ToolContext) -> str | None:
+    """对话 LLM 读取用户画像，仅限 DMN 目标用户本人。"""
+    if not await can_read_profile(get_event_from_tool_ctx(ctx)):
+        return _deny_profile()
+    try:
+        profile = read_profile(
+            PROFILE_PATH,
+            start_line=ctx.data.get("start_line"),
+            end_line=ctx.data.get("end_line"),
+        )
+        return _tools_ok(**profile)
+    except Exception as e:
+        logger.opt(exception=e, colors=True, raw=True).exception(
+            f"read_profile error: {e}"
+        )
+        return _tools_err(str(e))
 
 
 # 知识建议：对话 LLM -> 潜意识 Agent 审查管线
