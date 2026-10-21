@@ -15,7 +15,7 @@ dependencies = [
     "nonebot-plugin-orm[default]>=0.8.2",
 ]
 readme = "README.md"
-requires-python = ">=3.10, <3.14"
+requires-python = ">=3.11, <3.14"
 
 [project.entry-points."ambot.commands"]
 memory = "amrita_plugin_memory.cli:memory [full_load]"
