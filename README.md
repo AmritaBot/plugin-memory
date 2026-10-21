@@ -18,7 +18,7 @@
 ambot plugin add amrita_plugin_memory
 ```
 
-前置依赖：Python 3.11+ / AmritaBot 实例 / **Ollama 或 OpenAI 嵌入服务** / ChromaDB。
+前置依赖：Python 3.11–3.13 / AmritaBot 实例 / **Ollama 或 OpenAI 嵌入服务** / ChromaDB。
 
 > 嵌入服务是**必需**前置 —— 本插件不自带嵌入模型。
 
@@ -294,7 +294,7 @@ L1 临近上限时把细节下放到 L2，只留指针。
 
 ## 技术栈
 
-Python 3.11+ / NoneBot2 / AmritaCore，向量库 ChromaDB，嵌入走 OpenAI 或 Ollama，
+Python 3.11–3.13 / NoneBot2 / AmritaCore，向量库 ChromaDB，嵌入走 OpenAI 或 Ollama，
 调度 nonebot_plugin_apscheduler，持久化 nonebot_plugin_orm，配置 Pydantic + uniconf。
 
 

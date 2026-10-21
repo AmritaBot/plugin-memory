@@ -524,13 +524,14 @@ class IdlePlanner:
         free_minutes = min(capacity, gap_minutes)
 
         need = self.buffer_minutes + self.run_estimate
-        # 偏好时刻早于段首就贴段首：加一天会把它推到段外，
-        # 再被 latest_start 夹到段尾，整段空闲只用到最后 run_estimate 那点
+        # 偏好时刻：取段内最近的一次。段首晚于当天偏好时刻时，次日那次
+        # 可能仍落在段内（跨午夜的冷段），只有两次都不在段内才退到段首。
         target = seg_start.replace(
             hour=self.target_hour, minute=0, second=0, microsecond=0
         )
         if target < seg_start:
-            target = seg_start
+            nxt = target + timedelta(days=1)
+            target = nxt if nxt < seg_end else seg_start
         # 起点尽量靠近偏好时刻，但必须落在空闲段内且留够运行空间
         latest_start = max(f_start, f_end - need * 60)
         start_ts = min(max(f_start, target.timestamp()), latest_start)

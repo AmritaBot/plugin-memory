@@ -185,7 +185,7 @@ class ConfigFile(BaseModel):
         default_factory=DecayConfig, description="时间记忆退化配置"
     )
     per_session_memory_limit: int = Field(
-        default=100, description="每个会话的记忆数量限制，默认为50条"
+        default=100, description="每个会话的记忆数量限制，默认为100条"
     )
     memo_max_chars: int = Field(
         default=1000,
