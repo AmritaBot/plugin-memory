@@ -93,6 +93,8 @@ class SubconsciousRunner:
         self._replan_throttle: float = _REPLAN_THROTTLE_SECONDS
         # 待执行任务的触发时刻（unix 秒）：落盘后供重启恢复，0 表示无待执行任务
         self._pending_run_ts: float = 0.0
+        # 这条待执行任务属于哪个目标用户：换了 target 就不该再跑旧窗口
+        self._pending_uid: str = ""
         # 连续失败次数，成功一轮即清零
         self._fail_streak: int = 0
         # 本轮周期是否失败过：失败要重试，别把异常当成跑完
@@ -263,9 +265,10 @@ class SubconsciousRunner:
             replace_existing=True,
         )
         self._pending_run_ts = run_date.timestamp()
+        self._pending_uid = self.target_user_id
 
-    def _schedule_retry(self) -> None:
-        """本轮失败后补一次重试，避免一次异常就让 DMN 静默停摆。"""
+    async def _schedule_retry(self) -> None:
+        """本轮失败后补一次重试，并把重试状态落盘，重启后仍按同一节奏。"""
         if scheduler.get_job(self._job_id) is not None:
             return
         if self._fail_streak >= _MAX_RUN_RETRIES:
@@ -276,6 +279,8 @@ class SubconsciousRunner:
             return
         self._fail_streak += 1
         self._schedule_once(_RETRY_DELAY_MINUTES * 60)
+        # 不落盘的话，重启会丢掉这次重试，失败计数也会从零开始
+        await self._save_state_logged()
         logger.warning(
             f"[Subconscious] Retry #{self._fail_streak} "
             f"scheduled in {_RETRY_DELAY_MINUTES}min"
@@ -290,6 +295,13 @@ class SubconsciousRunner:
         if scheduler.get_job(self._job_id) is not None:
             return
         pending = self._pending_run_ts
+        if self._pending_uid and self._pending_uid != self.target_user_id:
+            logger.info(
+                "[Subconscious] Drop pending run: target user changed "
+                f"({self._pending_uid} -> {self.target_user_id})"
+            )
+            self._pending_run_ts = 0.0
+            pending = 0.0
         if pending <= 0:
             logger.info(
                 "[Subconscious] Idle — waiting for user chat to trigger first run"
@@ -332,10 +344,13 @@ class SubconsciousRunner:
         with contextlib.suppress(Exception):
             scheduler.remove_job(self._job_id)
         self._pending_run_ts = 0.0
+        self._pending_uid = ""
         if self._manual_task is not None and not self._manual_task.done():
             self._manual_task.cancel()
         # 持有引用，避免任务被 GC 回收
         self._manual_task = asyncio.create_task(self._run())
+        # 落盘清空：否则重启会把手动触发前那条旧计划又恢复出来
+        await self._save_state_logged()
 
     async def _run(self) -> None:
         """调度入口 — 保证任何异常路径都会释放运行标志。"""
@@ -369,7 +384,7 @@ class SubconsciousRunner:
             self._is_running = False
             self._cycle_task = None
             if not ok and not aborted:
-                self._schedule_retry()
+                await self._schedule_retry()
 
     async def _run_cycle(self) -> None:
         try:
@@ -464,6 +479,9 @@ class SubconsciousRunner:
                 f"[Subconscious] Cycle done but save failed, "
                 f"penalty NOT reset (penalty={_state.get_penalty_count()})"
             )
+        elif self._cycle_failed:
+            # 跑挂了就别清惩罚：失败不该被当成一轮有效整理
+            logger.warning("[Subconscious] Cycle failed, penalty kept")
         elif not _state.is_cycle_valid():
             # 空转周期（没取上下文就收工）不清惩罚，保留压力等下一轮
             logger.warning("[Subconscious] Cycle invalid, penalty kept")
@@ -588,6 +606,11 @@ class SubconsciousRunner:
                 self._pending_run_ts = float(payload.get("pending_run_ts", 0.0) or 0.0)
             except (TypeError, ValueError):
                 self._pending_run_ts = 0.0
+            self._pending_uid = str(payload.get("pending_uid", "") or "")
+            try:
+                self._fail_streak = int(payload.get("fail_streak", 0) or 0)
+            except (TypeError, ValueError):
+                self._fail_streak = 0
             # 旧 penalty 语义是"被推迟的次数"，与新语义（要求的冷段长度）不可换算，
             # 升级后清零一次，避免带着旧值把门槛顶到上限。
             # 仍走旧调度时数值是自洽的，别动它。
@@ -669,6 +692,8 @@ class SubconsciousRunner:
             "last_iter_summary": _state.get_last_iter_summary(),
             "penalty": _state.get_penalty_count(),
             "pending_run_ts": self._pending_run_ts,
+            "pending_uid": self._pending_uid,
+            "fail_streak": self._fail_streak,
             "last_abstracts": self._last_abstracts,
             "pending_messages": _state.get_pending(),
             "knowledge_suggestions": _state.get_knowledge_suggestions(),

@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import io
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, tzinfo
 from functools import lru_cache
 
 from PIL import Image, ImageDraw, ImageFont
@@ -81,18 +81,28 @@ def _px(v: float) -> float:
 
 @lru_cache(maxsize=1)
 def _font_path() -> str | None:
-    """按环境变量、候选路径顺序找第一个可用的字体文件。"""
+    """按环境变量、候选路径顺序找第一个真正能加载的字体文件。
+
+    只看文件存在不够：指到损坏或非字体文件时 Pillow 会退回位图字体，
+    而那套字形没有中文，标签会变成一片方框。这里先试加载一次。
+    """
     env = os.environ.get("AMRITA_MEMORY_HEATMAP_FONT", "").strip()
-    if env and os.path.exists(env):
-        return env
-    for path in _FONT_CANDIDATES:
-        if os.path.exists(path):
-            return path
+    candidates = [env] if env else []
+    candidates += list(_FONT_CANDIDATES)
+    for path in candidates:
+        if not os.path.exists(path):
+            continue
+        try:
+            ImageFont.truetype(path, 12)
+        except OSError:
+            continue
+        return path
     return None
 
 
 @lru_cache(maxsize=16)
 def _font(size: int) -> ImageFont.ImageFont | ImageFont.FreeTypeFont:
+    """按像素大小取字体，优先中文字体，加载不了就用 Pillow 自带位图字体。"""
     path = _font_path()
     if path:
         try:
@@ -111,6 +121,7 @@ def _t(zh: str, en: str) -> str:
 
 
 def _ramp(v: float) -> tuple[int, int, int]:
+    """把 0..1 的热度映射成取色节点之间的插值颜色。"""
     v = max(0.0, min(1.0, v))
     for i in range(len(_RAMP) - 1):
         lo, c_lo = _RAMP[i]
@@ -126,7 +137,12 @@ def _ramp(v: float) -> tuple[int, int, int]:
     return _RAMP[-1][1]
 
 
-def _text_size(draw: ImageDraw.ImageDraw, text: str, font) -> tuple[int, int]:
+def _text_size(
+    draw: ImageDraw.ImageDraw,
+    text: str,
+    font: ImageFont.ImageFont | ImageFont.FreeTypeFont,
+) -> tuple[int, int]:
+    """量出文本的像素宽高，用于居中与右对齐（不落地绘制）。"""
     left, top, right, bottom = draw.textbbox((0, 0), text, font=font)
     return int(right - left), int(bottom - top)
 
@@ -136,9 +152,10 @@ def _center(
     cx: float,
     cy: float,
     text: str,
-    font,
+    font: ImageFont.ImageFont | ImageFont.FreeTypeFont,
     fill: tuple[int, int, int],
 ) -> None:
+    """以 (cx, cy) 为中心画一行文本。"""
     w, h = _text_size(draw, text, font)
     draw.text((cx - w / 2, cy - h / 2), text, font=font, fill=fill)
 
@@ -148,14 +165,16 @@ def _right(
     x: float,
     cy: float,
     text: str,
-    font,
+    font: ImageFont.ImageFont | ImageFont.FreeTypeFont,
     fill: tuple[int, int, int],
 ) -> None:
+    """右端对齐到 x、垂直居中于 cy 画一行文本。"""
     w, h = _text_size(draw, text, font)
     draw.text((x - w, cy - h / 2), text, font=font, fill=fill)
 
 
 def _humanize(seconds: float) -> str:
+    """把剩余秒数说成"3 小时 12 分后"这种可读文本，已过期则明说。"""
     if seconds <= 0:
         return _t("已到时间", "due now")
     minutes = int(seconds // 60)
@@ -186,7 +205,7 @@ def _cell_box(wd: int, slot: int) -> tuple[float, float, float, float]:
     return x0, y0, x1, y1
 
 
-def _window_slots(plan: Plan, tz) -> list[tuple[int, int, int]]:
+def _window_slots(plan: Plan, tz: tzinfo) -> list[tuple[int, int, int]]:
     """把计划窗口换成 (星期几, 起始槽, 结束槽)，按槽取整。
 
     高亮是给"哪几个槽被占用"看的，框线必须落在槽边界上；
@@ -254,7 +273,10 @@ def render_heatmap_png(
     )
     _right(draw, WIDTH - PAD, _px(40), planner.tz_name, f_sub, MUTED)
 
-    observed = round(sum(state.coarse))
+    # 有累计计数就报累计值：热度会随时间变淡，但观测条数不该跟着缩水
+    has_raw = sum(state.raw_coarse) > 0
+    counts = state.raw_fine if has_raw else state.fine
+    observed = round(sum(state.raw_coarse) if has_raw else sum(state.coarse))
     tier_text = plan.tier if plan is not None else "-"
     subtitle = _t(
         f"观测 {observed} 条 · 活跃 {len(state.seen_days)} 天 · "
@@ -269,7 +291,8 @@ def render_heatmap_png(
         dt_days = max(0.0, (now_local.timestamp() - state.last_update) / 86400)
     decay = 2 ** (-dt_days / planner.tau_fine) if dt_days else 1.0
     weights = [max(0.0, v) * decay for v in state.fine]
-    peak = max(weights) if weights else 0.0
+    # 分母取累计峰值：整张图会随时间一起变淡，而不是每格重新拉满到最亮
+    peak = max(1.0, max(counts)) if counts else 1.0
 
     for wd in range(DAYS):
         cx = GRID_LEFT + (wd + 0.5) * CELL_W
@@ -289,7 +312,7 @@ def render_heatmap_png(
             ratio = weight / peak if peak > 1e-9 else 0.0
             x0, y0, x1, y1 = _cell_box(wd, slot)
             draw.rounded_rectangle((x0, y0, x1, y1), radius=_px(6), fill=_ramp(ratio))
-            raw = state.fine[idx]
+            raw = counts[idx]
             if raw >= 0.5:
                 fill = (18, 24, 32) if ratio > 0.62 else TEXT
                 _center(draw, (x0 + x1) / 2, (y0 + y1) / 2, f"{raw:.0f}", f_cell, fill)
@@ -348,7 +371,8 @@ def render_heatmap_png(
         w, _ = _text_size(draw, stamp, f_value)
         draw.text(
             (PAD + _px(30) + w, panel_top + _px(40)),
-            _humanize((local - now_local).total_seconds()),
+            # 用时间戳相减：按墙上时钟算，跨夏令时会差出一小时
+            _humanize(local.timestamp() - now_local.timestamp()),
             font=f_sub,
             fill=ACCENT,
         )
