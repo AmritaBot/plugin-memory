@@ -11,7 +11,7 @@
 
 格内数字是落盘时点的累计计数，颜色按半衰期折算到当前时刻并按线性映射取色：
 平方根压缩会把 1 条和 6 条拉成同一个亮度，冷热就分不出来了。
-规划窗口按真实分钟数画覆盖层，结束在槽中间时边界也落在槽中间。
+规划窗口按槽取整高亮：框线必须压在槽边界上，精确起止交给下面板里的文字。
 
 字体按候选路径查找，找不到中文字体时自动退回英文标签（PIL 自带位图字体
 没有 CJK 字形，硬画会出一片豆腐块）。
@@ -177,26 +177,24 @@ def _y_of(moment: datetime) -> float:
     return GRID_TOP + minutes / SLOT_MINUTES * CELL_H
 
 
-def _inset_y(y: float, *, top: bool) -> float:
-    """横边正好落在槽边界时向格内收一点。
-
-    收之前这条线压在两个格子之间的缝上，看着像框没对齐槽；
-    落在槽中间的分界（比如 03:00）保持原位，那才是真实时间。
-    """
-    slot = (y - GRID_TOP) / CELL_H
-    if abs(slot - round(slot)) < 1e-6:
-        return y + (_px(3) if top else -_px(3))
-    return y
+def _cell_box(wd: int, slot: int) -> tuple[float, float, float, float]:
+    """一个槽的绘制矩形（左, 上, 右, 下），与格子本身的内缩一致。"""
+    x0 = GRID_LEFT + wd * CELL_W + _px(3)
+    x1 = GRID_LEFT + (wd + 1) * CELL_W - _px(3)
+    y0 = GRID_TOP + slot * CELL_H + _px(3)
+    y1 = GRID_TOP + (slot + 1) * CELL_H - _px(3)
+    return x0, y0, x1, y1
 
 
-def _window_rects(plan: Plan, tz) -> list[tuple[int, float, float]]:
-    """把计划窗口拆成每列一段 (星期几, 纵起, 纵止)，按真实分钟定位。
+def _window_slots(plan: Plan, tz) -> list[tuple[int, int, int]]:
+    """把计划窗口换成 (星期几, 起始槽, 结束槽)，按槽取整。
 
-    跨午夜或跨天的窗口会拆到对应列上，避免整格高亮把窗口画宽。
+    高亮是给"哪几个槽被占用"看的，框线必须落在槽边界上；
+    精确到分钟的起止写在图下面板里，两者不要混着表达。
     """
     start = plan.start.astimezone(tz)
     end = plan.end.astimezone(tz)
-    rects: list[tuple[int, float, float]] = []
+    out: list[tuple[int, int, int]] = []
     day = start.replace(hour=0, minute=0, second=0, microsecond=0)
     for _ in range(DAYS + 1):
         if day > end:
@@ -204,15 +202,17 @@ def _window_rects(plan: Plan, tz) -> list[tuple[int, float, float]]:
         seg_start = max(start, day)
         seg_end = min(end, day + timedelta(days=1))
         if seg_end > seg_start:
-            rects.append(
-                (
-                    day.weekday(),
-                    _inset_y(_y_of(seg_start), top=True),
-                    _inset_y(_y_of(seg_end), top=False),
-                )
-            )
+            first = (seg_start.hour * 60 + seg_start.minute) // SLOT_MINUTES
+            if seg_end == day + timedelta(days=1):
+                last = SLOTS_PER_DAY - 1
+            else:
+                minutes = seg_end.hour * 60 + seg_end.minute
+                last = (minutes + SLOT_MINUTES - 1) // SLOT_MINUTES - 1
+            first = min(max(first, 0), SLOTS_PER_DAY - 1)
+            last = min(max(last, first), SLOTS_PER_DAY - 1)
+            out.append((day.weekday(), first, last))
         day += timedelta(days=1)
-    return rects
+    return out
 
 
 def render_heatmap_png(
@@ -287,10 +287,7 @@ def render_heatmap_png(
             idx = wd * SLOTS_PER_DAY + slot
             weight = weights[idx]
             ratio = weight / peak if peak > 1e-9 else 0.0
-            x0 = GRID_LEFT + wd * CELL_W + _px(3)
-            y0 = GRID_TOP + slot * CELL_H + _px(3)
-            x1 = GRID_LEFT + (wd + 1) * CELL_W - _px(3)
-            y1 = GRID_TOP + (slot + 1) * CELL_H - _px(3)
+            x0, y0, x1, y1 = _cell_box(wd, slot)
             draw.rounded_rectangle((x0, y0, x1, y1), radius=_px(6), fill=_ramp(ratio))
             raw = state.fine[idx]
             if raw >= 0.5:
@@ -304,14 +301,19 @@ def render_heatmap_png(
         # 半透明覆盖层单独画：直接填色会盖掉格内数字
         overlay = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 0))
         od = ImageDraw.Draw(overlay)
-        for wd, y0, y1 in _window_rects(plan, tz):
-            # 和格子的内缩量保持一致，框才贴着槽边而不是压在两格之间的缝上
-            x0 = GRID_LEFT + wd * CELL_W + _px(3)
-            x1 = GRID_LEFT + (wd + 1) * CELL_W - _px(3)
+        for wd, first, last in _window_slots(plan, tz):
+            # 逐格填色：整块铺一层会把槽之间的缝也染上，看着像没对齐格子
+            for slot in range(first, last + 1):
+                od.rounded_rectangle(
+                    _cell_box(wd, slot),
+                    radius=_px(6),
+                    fill=(242, 209, 139, 44),
+                )
+            x0, y0, _, _ = _cell_box(wd, first)
+            _, _, x1, y1 = _cell_box(wd, last)
             od.rounded_rectangle(
                 (x0, y0, x1, y1),
-                radius=_px(5),
-                fill=(242, 209, 139, 48),
+                radius=_px(6),
                 outline=(242, 209, 139, 235),
                 width=int(_px(2)),
             )
