@@ -1,8 +1,14 @@
 """热度图渲染：把 IdlePlanner 的 7×12 作息热度画成 PNG。
 
 纯渲染模块，只依赖 Pillow 与 schedule 的数据结构，不碰 nonebot，
-方便脱离运行时用临时脚本出图核对。格内数字是落盘时点的累计计数，
-颜色再按半衰期折算到当前时刻——数字看"来过多少条"，颜色看"现在有多热"。
+方便脱离运行时用临时脚本出图核对。
+
+版式是竖版的：纵轴是时间（一天 12 个两小时槽），横轴是星期几，
+和常见的作息表读法一致——从上往下看一天，从左往右看一周。
+
+格内数字是落盘时点的累计计数，颜色按半衰期折算到当前时刻并按线性映射取色：
+平方根压缩会把 1 条和 6 条拉成同一个亮度，冷热就分不出来了。
+规划窗口按真实分钟数画覆盖层，结束在槽中间时边界也落在槽中间。
 
 字体按候选路径查找，找不到中文字体时自动退回英文标签（PIL 自带位图字体
 没有 CJK 字形，硬画会出一片豆腐块）。
@@ -17,16 +23,16 @@ from functools import lru_cache
 
 from PIL import Image, ImageDraw, ImageFont
 
-from .schedule import DAYS, SLOT_MINUTES, SLOTS_PER_DAY, IdlePlanner, Plan, slot_of
+from .schedule import DAYS, SLOT_MINUTES, SLOTS_PER_DAY, IdlePlanner, Plan
 
-WIDTH = 1000
-HEIGHT = 648
+WIDTH = 760
+HEIGHT = 814
 PAD = 36
-GRID_LEFT = 96
-GRID_TOP = 152
-CELL_W = (WIDTH - GRID_LEFT - PAD) / SLOTS_PER_DAY
-CELL_H = 46
-GRID_BOTTOM = GRID_TOP + CELL_H * DAYS
+GRID_LEFT = 84
+GRID_TOP = 132
+CELL_W = (WIDTH - GRID_LEFT - PAD) / DAYS
+CELL_H = 44
+GRID_BOTTOM = GRID_TOP + CELL_H * SLOTS_PER_DAY
 
 BG = (15, 20, 26)
 PANEL = (22, 29, 38)
@@ -152,19 +158,30 @@ def _humanize(seconds: float) -> str:
     return f"in {minutes}m"
 
 
-def _plan_cells(plan: Plan, tz) -> set[tuple[int, int]]:
-    """把计划窗口铺到 (星期几, 槽位) 上，用于高亮。"""
-    cells: set[tuple[int, int]] = set()
-    cur = plan.start.astimezone(tz)
+def _y_of(moment: datetime) -> float:
+    """把一天里的时刻换算成网格纵坐标（0:00 在顶，24:00 在底）。"""
+    minutes = moment.hour * 60 + moment.minute + moment.second / 60
+    return GRID_TOP + minutes / SLOT_MINUTES * CELL_H
+
+
+def _window_rects(plan: Plan, tz) -> list[tuple[int, float, float]]:
+    """把计划窗口拆成每列一段 (星期几, 纵起, 纵止)，按真实分钟定位。
+
+    跨午夜或跨天的窗口会拆到对应列上，避免整格高亮把窗口画宽。
+    """
+    start = plan.start.astimezone(tz)
     end = plan.end.astimezone(tz)
-    for _ in range(SLOTS_PER_DAY * DAYS):
-        if cur >= end:
+    rects: list[tuple[int, float, float]] = []
+    day = start.replace(hour=0, minute=0, second=0, microsecond=0)
+    for _ in range(DAYS + 1):
+        if day > end:
             break
-        cells.add(slot_of(cur.timestamp(), tz))
-        cur += timedelta(minutes=SLOT_MINUTES)
-    if not cells:
-        cells.add(slot_of(plan.start.timestamp(), tz))
-    return cells
+        seg_start = max(start, day)
+        seg_end = min(end, day + timedelta(days=1))
+        if seg_end > seg_start:
+            rects.append((day.weekday(), _y_of(seg_start), _y_of(seg_end)))
+        day += timedelta(days=1)
+    return rects
 
 
 def render_heatmap_png(
@@ -178,7 +195,7 @@ def render_heatmap_png(
     """渲染热度图，返回 PNG 字节。
 
     next_run 是调度器里待执行任务的触发时间（可能为空：没有待执行任务），
-    plan 是上一次规划的窗口，用于在网格上高亮预计占用的槽位。
+    plan 是上一次规划的窗口，用于在网格上叠加预计占用的时间区间。
     """
     state = planner.state
     tz = planner.tz
@@ -220,41 +237,52 @@ def render_heatmap_png(
     weights = [max(0.0, v) * decay for v in state.fine]
     peak = max(weights) if weights else 0.0
 
-    for slot in range(SLOTS_PER_DAY):
-        cx = GRID_LEFT + (slot + 0.5) * CELL_W
-        _center(draw, cx, GRID_TOP - 16, f"{slot * 2:02d}", f_axis, MUTED)
-
-    highlight = _plan_cells(plan, tz) if plan is not None else set()
-    if next_run is not None:
-        highlight.add(slot_of(next_run.astimezone(tz).timestamp(), tz))
-    now_cell = slot_of(now_local.timestamp(), tz)
-
     for wd in range(DAYS):
-        row_cy = GRID_TOP + wd * CELL_H + CELL_H / 2
-        _right(draw, GRID_LEFT - 12, row_cy, _t(_WD_ZH[wd], _WD_EN[wd]), f_axis, MUTED)
-        for slot in range(SLOTS_PER_DAY):
+        cx = GRID_LEFT + (wd + 0.5) * CELL_W
+        _center(draw, cx, GRID_TOP - 18, _t(_WD_ZH[wd], _WD_EN[wd]), f_axis, MUTED)
+
+    for slot in range(SLOTS_PER_DAY):
+        cy = GRID_TOP + (slot + 0.5) * CELL_H
+        _right(draw, GRID_LEFT - 12, cy, f"{slot * 2:02d}", f_axis, MUTED)
+
+    now_slot = (now_local.hour * 60 + now_local.minute) // SLOT_MINUTES
+    now_wd = now_local.weekday()
+
+    for slot in range(SLOTS_PER_DAY):
+        for wd in range(DAYS):
             idx = wd * SLOTS_PER_DAY + slot
             weight = weights[idx]
-            ratio = (weight / peak) ** 0.5 if peak > 1e-9 else 0.0
-            x0 = GRID_LEFT + slot * CELL_W + 3
-            y0 = GRID_TOP + wd * CELL_H + 3
-            x1 = GRID_LEFT + (slot + 1) * CELL_W - 3
-            y1 = GRID_TOP + (wd + 1) * CELL_H - 3
+            ratio = weight / peak if peak > 1e-9 else 0.0
+            x0 = GRID_LEFT + wd * CELL_W + 3
+            y0 = GRID_TOP + slot * CELL_H + 3
+            x1 = GRID_LEFT + (wd + 1) * CELL_W - 3
+            y1 = GRID_TOP + (slot + 1) * CELL_H - 3
             draw.rounded_rectangle((x0, y0, x1, y1), radius=6, fill=_ramp(ratio))
             raw = state.fine[idx]
             if raw >= 0.5:
                 fill = (18, 24, 32) if ratio > 0.62 else TEXT
                 _center(draw, (x0 + x1) / 2, (y0 + y1) / 2, f"{raw:.0f}", f_cell, fill)
-            if (wd, slot) in highlight:
-                draw.rounded_rectangle(
-                    (x0, y0, x1, y1), radius=6, outline=HOT_MARK, width=2
-                )
-            if (wd, slot) == now_cell:
-                cx = (x0 + x1) / 2
-                cy = y1 - 7
-                draw.ellipse((cx - 3, cy - 3, cx + 3, cy + 3), fill=NOW_MARK)
+            if wd == now_wd and slot == now_slot:
+                draw.ellipse((x1 - 10, y1 - 10, x1 - 4, y1 - 4), fill=NOW_MARK)
 
-    panel_top = GRID_BOTTOM + 20
+    if plan is not None:
+        # 半透明覆盖层单独画：直接填色会盖掉格内数字
+        overlay = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 0))
+        od = ImageDraw.Draw(overlay)
+        for wd, y0, y1 in _window_rects(plan, tz):
+            x0 = GRID_LEFT + wd * CELL_W + 2
+            x1 = GRID_LEFT + (wd + 1) * CELL_W - 2
+            od.rounded_rectangle(
+                (x0, y0, x1, y1),
+                radius=5,
+                fill=(242, 209, 139, 48),
+                outline=(242, 209, 139, 235),
+                width=2,
+            )
+        img = Image.alpha_composite(img.convert("RGBA"), overlay).convert("RGB")
+        draw = ImageDraw.Draw(img)
+
+    panel_top = GRID_BOTTOM + 22
     draw.rounded_rectangle(
         (PAD, panel_top, WIDTH - PAD, panel_top + 84),
         radius=10,
@@ -270,7 +298,11 @@ def render_heatmap_png(
 
     if next_run is not None:
         local = next_run.astimezone(tz)
-        stamp = f"{local.strftime('%Y-%m-%d')} {_t(_WD_ZH[local.weekday()], _WD_EN[local.weekday()])} {local.strftime('%H:%M')}"
+        stamp = (
+            f"{local.strftime('%Y-%m-%d')} "
+            f"{_t(_WD_ZH[local.weekday()], _WD_EN[local.weekday()])} "
+            f"{local.strftime('%H:%M')}"
+        )
         draw.text((PAD + 18, panel_top + 32), stamp, font=f_value, fill=TEXT)
         w, _ = _text_size(draw, stamp, f_value)
         draw.text(
@@ -308,7 +340,7 @@ def render_heatmap_png(
         draw.text((PAD + 18, panel_top + 62), detail, font=f_small, fill=MUTED)
 
     bar_y = panel_top + 104
-    bar_w = 240
+    bar_w = 220
     for i in range(bar_w):
         draw.line(
             ((PAD + i, bar_y), (PAD + i, bar_y + 8)),
@@ -321,8 +353,8 @@ def render_heatmap_png(
         WIDTH - PAD,
         bar_y + 4,
         _t(
-            "每格 2 小时 · 颜色按半衰期衰减后的权重",
-            "2h per cell · color = decayed weight",
+            "纵轴 2 小时一槽 · 颜色按半衰期折算后的权重",
+            "2h per row · color = decayed weight",
         ),
         f_small,
         MUTED,
