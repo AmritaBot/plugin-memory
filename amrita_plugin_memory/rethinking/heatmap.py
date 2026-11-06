@@ -278,11 +278,12 @@ def render_heatmap_png(
     counts = state.raw_fine if has_raw else state.fine
     observed = round(sum(state.raw_coarse) if has_raw else sum(state.coarse))
     tier_text = plan.tier if plan is not None else "-"
+    approx = _t("（含迁移估算）", " (incl. migrated)")
     subtitle = _t(
-        f"观测 {observed} 条 · 活跃 {len(state.seen_days)} 天 · "
-        f"惩罚 #{penalty} · 分层 {tier_text}",
-        f"observations {observed} · active {len(state.seen_days)}d · "
-        f"penalty #{penalty} · tier {tier_text}",
+        f"观测 {observed} 条{'（含迁移估算）' if planner.counts_migrated else ''} · "
+        f"活跃 {len(state.seen_days)} 天 · 惩罚 #{penalty} · 分层 {tier_text}",
+        f"observations {observed}{approx if planner.counts_migrated else ''} · "
+        f"active {len(state.seen_days)}d · penalty #{penalty} · tier {tier_text}",
     )
     draw.text((PAD, _px(72)), subtitle, font=f_sub, fill=MUTED)
 
@@ -291,9 +292,10 @@ def render_heatmap_png(
         dt_days = max(0.0, (now_local.timestamp() - state.last_update) / 86400)
     decay = 2 ** (-dt_days / planner.tau_fine) if dt_days else 1.0
     weights = [max(0.0, v) * decay for v in state.fine]
-    # 分母取累计峰值与当前峰值的较大者：既随时间整体变淡，也不会因为
-    # 累计计数还没攒起来就把每格都顶到最亮（升级当天的典型情况）
-    peak = max(1.0, max(weights), max(counts)) if counts else 1.0
+    # 分母用累计峰值（不衰减）：整张图会随时间变淡，计数为 0 时才退回当前权重
+    peak = max(1.0, max(counts)) if max(counts, default=0.0) > 1e-9 else 1.0
+    if max(counts, default=0.0) <= 1e-9 and weights:
+        peak = max(1.0, max(weights))
 
     for wd in range(DAYS):
         cx = GRID_LEFT + (wd + 0.5) * CELL_W

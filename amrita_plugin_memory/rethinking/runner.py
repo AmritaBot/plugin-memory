@@ -158,8 +158,7 @@ class SubconsciousRunner:
         然后按新的冷段门槛重新选窗口。不 dump/恢复上下文——
         用户聊完天后有新内容，旧推理上下文应直接丢弃。
         """
-        # 先记下历史是否存在：首条消息会把热度图从空变成非空，
-        # 若观测后再判断，冷启动就会被自己这条消息绕过
+        # 先记下历史是否存在，否则冷启动会被自己这条消息绕过
         had_history = True
         with contextlib.suppress(Exception):
             had_history = self._planner.has_history()
@@ -173,8 +172,7 @@ class SubconsciousRunner:
 
         now_mono = time.monotonic()
         if now_mono - self._last_replan_at < self._replan_throttle:
-            # 同窗口内的后续消息不重排，但仍把待执行任务往后挪，
-            # 否则旧任务会在用户刚开始的这轮活动里跑起来
+            # 节流期内不重排，但仍把待执行任务往后挪，免得它插进这轮聊天
             self._defer_pending_job(penalty, had_history)
             await self._save_state_logged()
             return
@@ -463,9 +461,7 @@ class SubconsciousRunner:
         self._total_runs += 1
         _state.set_last_run_at(datetime.now(timezone.utc).timestamp())
 
-        # 先持久化，任一失败则不重置惩罚（保留重试机会）。
-        # 记下快照时的计数：保存期间用户可能又发消息把惩罚顶上去，
-        # 那部分增量不能被这次 reset 抹掉。
+        # 先持久化再重置惩罚；快照时的计数用于识别保存期间新增的消息
         penalty_before = _state.get_penalty_count()
         save_ok = True
         try:
@@ -611,9 +607,7 @@ class SubconsciousRunner:
                 self._fail_streak = int(payload.get("fail_streak", 0) or 0)
             except (TypeError, ValueError):
                 self._fail_streak = 0
-            # 旧 penalty 语义是"被推迟的次数"，与新语义（要求的冷段长度）不可换算，
-            # 升级后清零一次，避免带着旧值把门槛顶到上限。
-            # 仍走旧调度时数值是自洽的，别动它。
+            # 旧 penalty 语义不可换算，新调度下清零一次；仍走旧调度时别动
             if (
                 self._config.use_idle_window_planner
                 and "idle_planner" not in payload
@@ -698,12 +692,10 @@ class SubconsciousRunner:
             "pending_messages": _state.get_pending(),
             "knowledge_suggestions": _state.get_knowledge_suggestions(),
         }
-        # 只有启用空闲窗口调度时才写热度图：旧调度模式下写进去，
-        # 会让下次升级的迁移判断误以为已是新格式，跳过旧 penalty 清零
+        # 只在空闲窗口调度下写热度图，否则下次升级会误判为已是新格式
         if self._config.use_idle_window_planner:
             payload.update(self._planner.dump())
-        # 整行替换前先补齐老版本实例写过、本实例不认识的字段，
-        # 否则旧实例一存盘，热度图累积就被抹成"从没规划过"
+        # 整行替换前补齐本实例不认识的字段，别把旧实例写的数据抹掉
         try:
             existing = await self._read_state_payload(_STATE_UID)
         except Exception:
@@ -740,8 +732,7 @@ class SubconsciousRunner:
             character_prompt=character_prompt,
         )
 
-        # 指南文件仍走 Jinja2，但只提供不变量：旧文件里的 {{ current_time }}
-        # 会被渲染成空串，而不是原样泄漏到 system 里
+        # 指南文件仍走 Jinja2，但只提供不变量，旧模板变量会渲染成空串
         static_vars = {
             "current_date": current_date,
             "target_user_id": self._config.target_user_id or "(未配置)",

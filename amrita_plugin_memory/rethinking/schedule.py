@@ -216,6 +216,8 @@ class PlannerState:
     #: 热度图对应的时区名与目标用户，任一变化都要重建，否则星期几/钟点对不上
     tz_name: str = ""
     uid: str = ""
+    #: 累计计数里有从衰减权重补出来的格子，展示时要注明是估算
+    migrated_counts: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -228,6 +230,7 @@ class PlannerState:
             "last_update": self.last_update,
             "tz_name": self.tz_name,
             "uid": self.uid,
+            "migrated_counts": self.migrated_counts,
         }
 
 
@@ -290,12 +293,16 @@ class IdlePlanner:
                 self.state.raw_fine = raw_fine
             if len(raw_coarse) == SLOTS_PER_DAY:
                 self.state.raw_coarse = raw_coarse
-            # 升级前的快照没有累计计数：拿衰减值当起点，
-            # 否则格内数字从 0 重来，和颜色对不上
-            if not any(self.state.raw_fine) and any(self.state.fine):
-                self.state.raw_fine = list(self.state.fine)
-            if not any(self.state.raw_coarse) and any(self.state.coarse):
-                self.state.raw_coarse = list(self.state.coarse)
+            # 升级前的快照没有累计计数：逐格用衰减值补位，只补空的格子
+            self.state.migrated_counts = bool(raw.get("migrated_counts", False))
+            for idx, value in enumerate(self.state.fine):
+                if self.state.raw_fine[idx] <= 0 and value > 0:
+                    self.state.raw_fine[idx] = value
+                    self.state.migrated_counts = True
+            for idx, value in enumerate(self.state.coarse):
+                if self.state.raw_coarse[idx] <= 0 and value > 0:
+                    self.state.raw_coarse[idx] = value
+                    self.state.migrated_counts = True
             seen = raw.get("seen_days", [])
             if isinstance(seen, list):
                 self.state.seen_days = [str(d) for d in seen][-_MAX_SEEN_DAYS:]
@@ -378,6 +385,11 @@ class IdlePlanner:
         self.state.recent.append(now_ts)
         if len(self.state.recent) > _MAX_RECENT:
             self.state.recent = self.state.recent[-_MAX_RECENT:]
+
+    @property
+    def counts_migrated(self) -> bool:
+        """累计计数里是否有从衰减权重补出来的格子。"""
+        return self.state.migrated_counts
 
     def last_plan(self) -> Plan | None:
         return self._last_plan
@@ -578,8 +590,7 @@ class IdlePlanner:
         free_minutes = min(capacity, gap_minutes)
 
         need = self.buffer_minutes + self.run_estimate
-        # 偏好时刻：取段内最近的一次。段首晚于当天偏好时刻时，次日那次
-        # 可能仍落在段内（跨午夜的冷段），只有两次都不在段内才退到段首。
+        # 偏好时刻取段内最近的一次，跨午夜的冷段会用到次日那次
         target = seg_start.replace(
             hour=self.target_hour, minute=0, second=0, microsecond=0
         )
@@ -688,20 +699,19 @@ class IdlePlanner:
                 out.append((seg_start, seg_end, length_slots))
         return out
 
-    def _nearest(
+    def _ordered(
         self, cands: Sequence[tuple[datetime, datetime, int]], now: datetime
-    ) -> tuple[datetime, datetime, int] | None:
-        """最近的一段；同样近就取更长的，避免周内几段打平时挑到短的。"""
-        if not cands:
-            return None
+    ) -> list[tuple[datetime, datetime, int]]:
+        """按距离排序，同样近就取更长的；最多取前几段，避免逐段试太久。"""
         now_local = now.astimezone(self.tz)
-        return min(
+        ranked = sorted(
             cands,
             key=lambda c: (
                 max(0.0, (c[0] - now_local).total_seconds()),
                 -(c[1] - c[0]),
             ),
         )
+        return ranked[:8]
 
     def _plan(self, penalty: int = 1, now: datetime | None = None) -> Plan:
         now = now or datetime.now(timezone.utc)
@@ -721,40 +731,39 @@ class IdlePlanner:
         for step in range(self.max_relax + 1):
             need_slots = max(1, want >> step)
             for tier in tiers:
-                picked = self._nearest(
+                # 最近的一段可能剩余空间不够，接着试同层后面的候选
+                for picked in self._ordered(
                     self._candidates(days, tier, need_slots, now), now
-                )
-                if picked is None:
-                    continue
-                plan = self._refine(
-                    picked[0],
-                    picked[1],
-                    now,
-                    tier,
-                    penalty,
-                    step,
-                    forced=False,
-                )
-                if plan is not None:
-                    return plan
+                ):
+                    plan = self._refine(
+                        picked[0],
+                        picked[1],
+                        now,
+                        tier,
+                        penalty,
+                        step,
+                        forced=False,
+                    )
+                    if plan is not None:
+                        return plan
 
         # 全部放宽仍不足：取一周内最长的那段冷段
         for tier in tiers:
             cands = self._candidates(days, tier, 1, now)
             if not cands:
                 continue
-            picked = max(cands, key=lambda c: c[1] - c[0])
-            plan = self._refine(
-                picked[0],
-                picked[1],
-                now,
-                tier,
-                penalty,
-                self.max_relax,
-                forced=True,
-            )
-            if plan is not None:
-                return plan
+            for picked in sorted(cands, key=lambda c: -(c[1] - c[0]))[:8]:
+                plan = self._refine(
+                    picked[0],
+                    picked[1],
+                    now,
+                    tier,
+                    penalty,
+                    self.max_relax,
+                    forced=True,
+                )
+                if plan is not None:
+                    return plan
 
         # 完全没有可用冷段（用户几乎全天活跃）：退到热度最低的连续段
         wd = local.weekday()
