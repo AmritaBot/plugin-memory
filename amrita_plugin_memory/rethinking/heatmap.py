@@ -294,8 +294,11 @@ def render_heatmap_png(
                 fill = (18, 24, 32) if ratio > 0.62 else TEXT
                 _center(draw, (x0 + x1) / 2, (y0 + y1) / 2, f"{raw:.0f}", f_cell, fill)
             if wd == now_wd and slot == now_slot:
-                r = _px(3)
-                draw.ellipse((x1 - r * 2, y1 - r * 2, x1, y1), fill=NOW_MARK)
+                # 红点要整个落在格子里：贴到圆角上会看成跑到格子外面去了
+                r = _px(3.5)
+                cx = x1 - _px(9)
+                cy = y1 - _px(9)
+                draw.ellipse((cx - r, cy - r, cx + r, cy + r), fill=NOW_MARK)
 
     if plan is not None:
         # 半透明覆盖层单独画：直接填色会盖掉格内数字
@@ -399,8 +402,8 @@ def render_heatmap_png(
         WIDTH - PAD,
         bar_y + bar_h / 2,
         _t(
-            "纵轴 2 小时一槽 · 颜色按半衰期折算后的权重",
-            "2h per row · color = decayed weight",
+            "纵轴 2 小时一槽 · 红点=当前时段 · 颜色按半衰期折算后的权重",
+            "2h per row · dot = now · color = decayed weight",
         ),
         f_small,
         MUTED,
