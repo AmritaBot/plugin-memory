@@ -6,6 +6,9 @@
 版式是竖版的：纵轴是时间（一天 12 个两小时槽），横轴是星期几，
 和常见的作息表读法一致——从上往下看一天，从左往右看一周。
 
+整张图按 SCALE 倍超采样绘制：小字号中文在 1x 下笔画会糊在一起，
+把画布和字号一起放大再出图，边缘才立得住。
+
 格内数字是落盘时点的累计计数，颜色按半衰期折算到当前时刻并按线性映射取色：
 平方根压缩会把 1 条和 6 条拉成同一个亮度，冷热就分不出来了。
 规划窗口按真实分钟数画覆盖层，结束在槽中间时边界也落在槽中间。
@@ -25,13 +28,18 @@ from PIL import Image, ImageDraw, ImageFont
 
 from .schedule import DAYS, SLOT_MINUTES, SLOTS_PER_DAY, IdlePlanner, Plan
 
-WIDTH = 760
-HEIGHT = 814
-PAD = 36
-GRID_LEFT = 84
-GRID_TOP = 132
-CELL_W = (WIDTH - GRID_LEFT - PAD) / DAYS
-CELL_H = 44
+#: 超采样倍率：1x 下 12px 中文基本看不清，整体放大后出图
+SCALE = 2
+_LOGICAL_W = 760
+_LOGICAL_H = 814
+
+WIDTH = _LOGICAL_W * SCALE
+HEIGHT = _LOGICAL_H * SCALE
+PAD = 36 * SCALE
+GRID_LEFT = 84 * SCALE
+GRID_TOP = 132 * SCALE
+CELL_W = (_LOGICAL_W - 84 - 36) / DAYS * SCALE
+CELL_H = 44 * SCALE
 GRID_BOTTOM = GRID_TOP + CELL_H * SLOTS_PER_DAY
 
 BG = (15, 20, 26)
@@ -64,6 +72,11 @@ _FONT_CANDIDATES = (
 
 _WD_ZH = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")
 _WD_EN = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+
+
+def _px(v: float) -> float:
+    """逻辑像素换算成实际画布像素。"""
+    return v * SCALE
 
 
 @lru_cache(maxsize=1)
@@ -207,18 +220,21 @@ def render_heatmap_png(
     img = Image.new("RGB", (WIDTH, HEIGHT), BG)
     draw = ImageDraw.Draw(img)
 
-    f_title = _font(26)
-    f_sub = _font(14)
-    f_cell = _font(13)
-    f_axis = _font(13)
-    f_label = _font(13)
-    f_value = _font(22)
-    f_small = _font(12)
+    f_title = _font(_px(26))
+    f_sub = _font(_px(14))
+    f_cell = _font(_px(13))
+    f_axis = _font(_px(13))
+    f_label = _font(_px(13))
+    f_value = _font(_px(22))
+    f_small = _font(_px(13))
 
     draw.text(
-        (PAD, 26), _t("潜意识热度图", "Subconscious heatmap"), font=f_title, fill=TEXT
+        (PAD, _px(26)),
+        _t("潜意识热度图", "Subconscious heatmap"),
+        font=f_title,
+        fill=TEXT,
     )
-    _right(draw, WIDTH - PAD, 40, planner.tz_name, f_sub, MUTED)
+    _right(draw, WIDTH - PAD, _px(40), planner.tz_name, f_sub, MUTED)
 
     observed = round(sum(state.coarse))
     tier_text = plan.tier if plan is not None else "-"
@@ -228,7 +244,7 @@ def render_heatmap_png(
         f"observations {observed} · active {len(state.seen_days)}d · "
         f"penalty #{penalty} · tier {tier_text}",
     )
-    draw.text((PAD, 72), subtitle, font=f_sub, fill=MUTED)
+    draw.text((PAD, _px(72)), subtitle, font=f_sub, fill=MUTED)
 
     dt_days = 0.0
     if state.last_update:
@@ -239,11 +255,11 @@ def render_heatmap_png(
 
     for wd in range(DAYS):
         cx = GRID_LEFT + (wd + 0.5) * CELL_W
-        _center(draw, cx, GRID_TOP - 18, _t(_WD_ZH[wd], _WD_EN[wd]), f_axis, MUTED)
+        _center(draw, cx, GRID_TOP - _px(18), _t(_WD_ZH[wd], _WD_EN[wd]), f_axis, MUTED)
 
     for slot in range(SLOTS_PER_DAY):
         cy = GRID_TOP + (slot + 0.5) * CELL_H
-        _right(draw, GRID_LEFT - 12, cy, f"{slot * 2:02d}", f_axis, MUTED)
+        _right(draw, GRID_LEFT - _px(12), cy, f"{slot * 2:02d}", f_axis, MUTED)
 
     now_slot = (now_local.hour * 60 + now_local.minute) // SLOT_MINUTES
     now_wd = now_local.weekday()
@@ -253,44 +269,45 @@ def render_heatmap_png(
             idx = wd * SLOTS_PER_DAY + slot
             weight = weights[idx]
             ratio = weight / peak if peak > 1e-9 else 0.0
-            x0 = GRID_LEFT + wd * CELL_W + 3
-            y0 = GRID_TOP + slot * CELL_H + 3
-            x1 = GRID_LEFT + (wd + 1) * CELL_W - 3
-            y1 = GRID_TOP + (slot + 1) * CELL_H - 3
-            draw.rounded_rectangle((x0, y0, x1, y1), radius=6, fill=_ramp(ratio))
+            x0 = GRID_LEFT + wd * CELL_W + _px(3)
+            y0 = GRID_TOP + slot * CELL_H + _px(3)
+            x1 = GRID_LEFT + (wd + 1) * CELL_W - _px(3)
+            y1 = GRID_TOP + (slot + 1) * CELL_H - _px(3)
+            draw.rounded_rectangle((x0, y0, x1, y1), radius=_px(6), fill=_ramp(ratio))
             raw = state.fine[idx]
             if raw >= 0.5:
                 fill = (18, 24, 32) if ratio > 0.62 else TEXT
                 _center(draw, (x0 + x1) / 2, (y0 + y1) / 2, f"{raw:.0f}", f_cell, fill)
             if wd == now_wd and slot == now_slot:
-                draw.ellipse((x1 - 10, y1 - 10, x1 - 4, y1 - 4), fill=NOW_MARK)
+                r = _px(3)
+                draw.ellipse((x1 - r * 2, y1 - r * 2, x1, y1), fill=NOW_MARK)
 
     if plan is not None:
         # 半透明覆盖层单独画：直接填色会盖掉格内数字
         overlay = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 0))
         od = ImageDraw.Draw(overlay)
         for wd, y0, y1 in _window_rects(plan, tz):
-            x0 = GRID_LEFT + wd * CELL_W + 2
-            x1 = GRID_LEFT + (wd + 1) * CELL_W - 2
+            x0 = GRID_LEFT + wd * CELL_W + _px(2)
+            x1 = GRID_LEFT + (wd + 1) * CELL_W - _px(2)
             od.rounded_rectangle(
                 (x0, y0, x1, y1),
-                radius=5,
+                radius=_px(5),
                 fill=(242, 209, 139, 48),
                 outline=(242, 209, 139, 235),
-                width=2,
+                width=int(_px(2)),
             )
         img = Image.alpha_composite(img.convert("RGBA"), overlay).convert("RGB")
         draw = ImageDraw.Draw(img)
 
-    panel_top = GRID_BOTTOM + 22
+    panel_top = GRID_BOTTOM + _px(22)
     draw.rounded_rectangle(
-        (PAD, panel_top, WIDTH - PAD, panel_top + 84),
-        radius=10,
+        (PAD, panel_top, WIDTH - PAD, panel_top + _px(84)),
+        radius=_px(10),
         fill=PANEL,
         outline=BORDER,
     )
     draw.text(
-        (PAD + 18, panel_top + 12),
+        (PAD + _px(18), panel_top + _px(12)),
         _t("下次 DMN 运行", "Next DMN run"),
         font=f_label,
         fill=MUTED,
@@ -303,23 +320,23 @@ def render_heatmap_png(
             f"{_t(_WD_ZH[local.weekday()], _WD_EN[local.weekday()])} "
             f"{local.strftime('%H:%M')}"
         )
-        draw.text((PAD + 18, panel_top + 32), stamp, font=f_value, fill=TEXT)
+        draw.text((PAD + _px(18), panel_top + _px(32)), stamp, font=f_value, fill=TEXT)
         w, _ = _text_size(draw, stamp, f_value)
         draw.text(
-            (PAD + 30 + w, panel_top + 40),
+            (PAD + _px(30) + w, panel_top + _px(40)),
             _humanize((local - now_local).total_seconds()),
             font=f_sub,
             fill=ACCENT,
         )
     else:
         draw.text(
-            (PAD + 18, panel_top + 32),
+            (PAD + _px(18), panel_top + _px(32)),
             _t("尚未排期", "not scheduled"),
             font=f_value,
             fill=HOT_MARK,
         )
         draw.text(
-            (PAD + 18 + 130, panel_top + 40),
+            (PAD + _px(148), panel_top + _px(40)),
             _t("等用户下一条消息触发规划", "waiting for next user message"),
             font=f_sub,
             fill=MUTED,
@@ -337,21 +354,29 @@ def render_heatmap_png(
         )
         if plan.note:
             detail += f" · {plan.note}"
-        draw.text((PAD + 18, panel_top + 62), detail, font=f_small, fill=MUTED)
+        draw.text(
+            (PAD + _px(18), panel_top + _px(62)), detail, font=f_small, fill=MUTED
+        )
 
-    bar_y = panel_top + 104
-    bar_w = 220
-    for i in range(bar_w):
+    bar_y = panel_top + _px(104)
+    bar_w = _px(220)
+    bar_h = _px(10)
+    for i in range(int(bar_w)):
         draw.line(
-            ((PAD + i, bar_y), (PAD + i, bar_y + 8)),
+            ((PAD + i, bar_y), (PAD + i, bar_y + bar_h)),
             fill=_ramp(i / max(1, bar_w - 1)),
         )
-    draw.text((PAD, bar_y - 4), _t("冷", "cold"), font=f_small, fill=MUTED)
-    draw.text((PAD + bar_w + 10, bar_y - 4), _t("热", "hot"), font=f_small, fill=MUTED)
+    draw.text((PAD, bar_y - _px(4)), _t("冷", "cold"), font=f_small, fill=MUTED)
+    draw.text(
+        (PAD + bar_w + _px(10), bar_y - _px(4)),
+        _t("热", "hot"),
+        font=f_small,
+        fill=MUTED,
+    )
     _right(
         draw,
         WIDTH - PAD,
-        bar_y + 4,
+        bar_y + bar_h / 2,
         _t(
             "纵轴 2 小时一槽 · 颜色按半衰期折算后的权重",
             "2h per row · color = decayed weight",
