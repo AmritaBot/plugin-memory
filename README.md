@@ -139,6 +139,10 @@ L1 临近上限时把细节下放到 L2，只留指针。
 
 整理职责：去重合并、重要性校准与标签统一、画像精炼、知识沉淀、临近上限时压缩 L1。
 
+调度可靠性：待执行任务的触发时刻随状态一起落盘，重启后会补排（停机期间错过的窗口
+一分钟内补跑）；任务的 `misfire_grace_time` 置空，事件循环被卡住也不会把这次运行
+静默丢弃；单轮失败按 30 分钟间隔最多重试 3 次，用户再发消息会重置重试计数。
+
 ## 嵌入模型与重映射
 
 向量只在同一模型下可比，换模型会让旧向量静默劣化且不报错。插件在集合 metadata 里记
@@ -223,6 +227,7 @@ L1 临近上限时把细节下放到 L2，只留指针。
 /memory group delete <ID>     删除群共享记忆（仅管理员 / 群主）
 /memory memo                  以合并转发查看当前作用域备忘录
 /memory dmn                   立即触发一轮巩固循环
+/memory heatmap               渲染作息热度图（含下次运行时间）
 ```
 
 `memo` 只读：查看谁都有权限，写入走工具。群里 `/memory memo` 看的是群备忘录，
@@ -231,6 +236,10 @@ L1 临近上限时把细节下放到 L2，只留指针。
 `dmn`（别名 `run`、`触发`）是隐藏选项：不进菜单与 usage 提示，非管理员调用
 按未知选项处理。鉴权顺序为超级用户白名单，其次 `lp.admin` 权限节点。
 还需要 `subconscious.enabled = true` 且已配好 `target_user_id`。
+
+`heatmap`（别名 `heat`、`热图`、`热度图`）同样隐藏且鉴权一致：发一张 7×12 的作息
+热度图，格内数字是原始观测条数，颜色按半衰期衰减后的权重取色，图上标出当前时槽
+与下次 DMN 运行时间（含窗口长度、分层与 penalty）。
 
 兼容旧格式 `/memory list` 等，默认以个人范围执行。群聊里 `user` 与 `group`
 两个范围都可用，私聊只有 `user`。
@@ -457,6 +466,7 @@ amrita_plugin_memory/
     ├── runner.py              # SubconsciousRunner — 核心编排器
     ├── hooks.py               # on_precompletion hook / 生命周期管理
     ├── schedule.py            # 空闲窗口规划（纯数据 + 纯函数，唯一时区解析入口）
+    ├── heatmap.py             # 热度图渲染（Pillow，纯渲染不碰运行时）
     ├── tools.py               # 21 个巩固循环工具 handler
     ├── schemas.py             # ToolFunctionSchema 定义
     └── knowledge.py           # KnowledgeBaseManager — 三方同步知识库

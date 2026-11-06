@@ -50,6 +50,9 @@ from .types import SessionSummary
 _STATE_UID = "amrita_memory"
 #: 重排节流窗口（秒）
 _REPLAN_THROTTLE_SECONDS = 60.0
+#: 单轮失败后的重试间隔（分钟）与连续重试上限，超限就等用户下一条消息
+_RETRY_DELAY_MINUTES = 30
+_MAX_RUN_RETRIES = 3
 _LEGACY_REPO_UID = (
     "amrita_memory"  # 旧版本元状态占用的 Bot Memory 表 uid（仅用于升级迁移）
 )
@@ -88,6 +91,14 @@ class SubconsciousRunner:
         # 重排节流：一分钟内重复触发只更新惩罚与热度，不重复规划
         self._last_replan_at: float = 0.0
         self._replan_throttle: float = _REPLAN_THROTTLE_SECONDS
+        # 待执行任务的触发时刻（unix 秒）：落盘后供重启恢复，0 表示无待执行任务
+        self._pending_run_ts: float = 0.0
+        # 这条待执行任务属于哪个目标用户：换了 target 就不该再跑旧窗口
+        self._pending_uid: str = ""
+        # 连续失败次数，成功一轮即清零
+        self._fail_streak: int = 0
+        # 本轮周期是否失败过：失败要重试，别把异常当成跑完
+        self._cycle_failed: bool = False
         # 状态写入串行化：并发 save 先后到达时，旧快照不能盖掉新快照
         self._state_lock = asyncio.Lock()
         # 正在跑的周期任务，用户新消息到来时可以掐断
@@ -131,7 +142,8 @@ class SubconsciousRunner:
             await self._kb_manager.validate_on_startup()
         else:
             logger.info("[Subconscious] Knowledge base disabled via config")
-        logger.info("[Subconscious] Idle — waiting for user chat to trigger first run")
+        # 关机前还没跑的窗口要补排，否则重启后 DMN 会一直等到用户开口
+        await self.restore_schedule()
 
     def stop(self) -> None:
         with contextlib.suppress(Exception):
@@ -153,6 +165,8 @@ class SubconsciousRunner:
             had_history = self._planner.has_history()
             self._planner.observe(chat_ts)
         penalty = _state.increment_penalty()
+        # 用户回来了，之前连续失败的计数不再代表当前状况
+        self._fail_streak = 0
 
         # 用户在聊天，正在跑的那一轮已经过时了，掐掉避免它把旧结论写回记忆
         self._abort_running_cycle()
@@ -215,6 +229,7 @@ class SubconsciousRunner:
                 scheduler.reschedule_job(
                     self._job_id, trigger="date", run_date=run_date
                 )
+                self._pending_run_ts = run_date.timestamp()
         except Exception as e:
             logger.warning(f"[Subconscious] Defer pending job failed: {e}")
 
@@ -234,24 +249,108 @@ class SubconsciousRunner:
             logger.warning(f"[Subconscious] Save state failed: {e}")
 
     def _schedule_once(self, delay_seconds: int) -> None:
-        run_date = datetime.now(timezone.utc) + timedelta(seconds=delay_seconds)
+        """排一次待执行任务，并把触发时刻记进状态，供重启后恢复。"""
+        run_date = datetime.now(timezone.utc) + timedelta(
+            seconds=max(1, int(delay_seconds))
+        )
         scheduler.add_job(
             self._run,
             trigger="date",
             run_date=run_date,
             id=self._job_id,
-            misfire_grace_time=30,
+            # 事件循环被同步 IO 或长任务卡住时，30 秒宽限会让这次运行被静默丢弃
+            misfire_grace_time=None,
+            coalesce=True,
+            max_instances=1,
             replace_existing=True,
         )
+        self._pending_run_ts = run_date.timestamp()
+        self._pending_uid = self.target_user_id
+
+    async def _schedule_retry(self) -> None:
+        """本轮失败后补一次重试，并把重试状态落盘，重启后仍按同一节奏。"""
+        if scheduler.get_job(self._job_id) is not None:
+            return
+        if self._fail_streak >= _MAX_RUN_RETRIES:
+            logger.warning(
+                f"[Subconscious] {self._fail_streak} failed runs in a row, "
+                "stop retrying until next user chat"
+            )
+            return
+        self._fail_streak += 1
+        self._schedule_once(_RETRY_DELAY_MINUTES * 60)
+        # 不落盘的话，重启会丢掉这次重试，失败计数也会从零开始
+        await self._save_state_logged()
+        logger.warning(
+            f"[Subconscious] Retry #{self._fail_streak} "
+            f"scheduled in {_RETRY_DELAY_MINUTES}min"
+        )
+
+    async def restore_schedule(self) -> None:
+        """重启后补排关机前还没跑的窗口。
+
+        只恢复真的待执行过的任务：没有 pending 时间戳说明上一轮已经跑完、
+        正等用户下一条消息，此时补排会让 DMN 在没有用户活动时无限自转。
+        """
+        if scheduler.get_job(self._job_id) is not None:
+            return
+        pending = self._pending_run_ts
+        if self._pending_uid and self._pending_uid != self.target_user_id:
+            logger.info(
+                "[Subconscious] Drop pending run: target user changed "
+                f"({self._pending_uid} -> {self.target_user_id})"
+            )
+            self._pending_run_ts = 0.0
+            pending = 0.0
+        if pending <= 0:
+            logger.info(
+                "[Subconscious] Idle — waiting for user chat to trigger first run"
+            )
+            return
+        delay = int(pending - datetime.now(timezone.utc).timestamp())
+        if delay < 60:
+            # 停机期间错过了窗口：尽快补跑，别拖到下一个冷段
+            logger.info(
+                "[Subconscious] Pending window missed during downtime, run soon"
+            )
+            delay = 60
+        self._schedule_once(delay)
+        logger.info(f"[Subconscious] Restored pending run in {delay // 60}min")
+
+    @property
+    def planner(self) -> IdlePlanner:
+        return self._planner
+
+    def next_run_at(self) -> datetime | None:
+        """调度器里待执行任务的触发时间；没有待执行任务时返回 None。"""
+        job = scheduler.get_job(self._job_id)
+        if job is None:
+            return None
+        return job.next_run_time
+
+    def scheduler_snapshot(self) -> dict[str, Any]:
+        """给状态展示用的一份只读快照。"""
+        return {
+            "next_run": self.next_run_at(),
+            "pending_run_ts": self._pending_run_ts,
+            "is_running": self._is_running,
+            "penalty": _state.get_penalty_count(),
+            "plan": self._planner.last_plan(),
+            "tz_name": self._planner.tz_name,
+        }
 
     async def trigger_now(self) -> None:
         """手动触发：取消待执行任务并立刻跑一轮，不阻塞调用方。"""
         with contextlib.suppress(Exception):
             scheduler.remove_job(self._job_id)
+        self._pending_run_ts = 0.0
+        self._pending_uid = ""
         if self._manual_task is not None and not self._manual_task.done():
             self._manual_task.cancel()
         # 持有引用，避免任务被 GC 回收
         self._manual_task = asyncio.create_task(self._run())
+        # 落盘清空：否则重启会把手动触发前那条旧计划又恢复出来
+        await self._save_state_logged()
 
     async def _run(self) -> None:
         """调度入口 — 保证任何异常路径都会释放运行标志。"""
@@ -261,13 +360,31 @@ class SubconsciousRunner:
         self._is_running = True
         self._cycle_task = asyncio.current_task()
         self._context_fetched = False
+        self._pending_run_ts = 0.0
+        self._cycle_failed = False
+        ok = False
+        aborted = False
         try:
             # 窗口已实际占用：记一次观测，避免下一轮重复选同一段
             with contextlib.suppress(Exception):
                 self._planner.note_window_taken(time.time())
             await self._run_cycle()
+            ok = not self._cycle_failed
+            if ok:
+                self._fail_streak = 0
+        except asyncio.CancelledError:
+            # 用户发来新消息把本轮掐了，重排由 cancel_and_reschedule 负责
+            aborted = True
+            raise
+        except Exception as e:
+            logger.opt(exception=e, colors=True, raw=True).error(
+                f"[Subconscious] Run failed: {e}"
+            )
         finally:
             self._is_running = False
+            self._cycle_task = None
+            if not ok and not aborted:
+                await self._schedule_retry()
 
     async def _run_cycle(self) -> None:
         try:
@@ -276,6 +393,7 @@ class SubconsciousRunner:
             logger.opt(exception=e, colors=True, raw=True).error(
                 f"[Subconscious] No usable preset, skip cycle: {e}"
             )
+            self._cycle_failed = True
             return
         prompt_text = await self._load_prompt()
         user_msg_text = (
@@ -311,6 +429,7 @@ class SubconsciousRunner:
             self._chat_obj = None
             raise
         except Exception as e:
+            self._cycle_failed = True
             logger.opt(exception=e, colors=True, raw=True).exception(
                 f"[Subconscious] Error: {e}"
             )
@@ -360,6 +479,9 @@ class SubconsciousRunner:
                 f"[Subconscious] Cycle done but save failed, "
                 f"penalty NOT reset (penalty={_state.get_penalty_count()})"
             )
+        elif self._cycle_failed:
+            # 跑挂了就别清惩罚：失败不该被当成一轮有效整理
+            logger.warning("[Subconscious] Cycle failed, penalty kept")
         elif not _state.is_cycle_valid():
             # 空转周期（没取上下文就收工）不清惩罚，保留压力等下一轮
             logger.warning("[Subconscious] Cycle invalid, penalty kept")
@@ -480,6 +602,15 @@ class SubconsciousRunner:
             _state.set_last_iter_summary(str(payload.get("last_iter_summary", "")))
             _state.set_last_run_at(self._read_last_run_ts(payload))
             self._planner.load(payload)
+            try:
+                self._pending_run_ts = float(payload.get("pending_run_ts", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                self._pending_run_ts = 0.0
+            self._pending_uid = str(payload.get("pending_uid", "") or "")
+            try:
+                self._fail_streak = int(payload.get("fail_streak", 0) or 0)
+            except (TypeError, ValueError):
+                self._fail_streak = 0
             # 旧 penalty 语义是"被推迟的次数"，与新语义（要求的冷段长度）不可换算，
             # 升级后清零一次，避免带着旧值把门槛顶到上限。
             # 仍走旧调度时数值是自洽的，别动它。
@@ -560,6 +691,9 @@ class SubconsciousRunner:
             "last_run_ts": _state.get_last_run_at(),
             "last_iter_summary": _state.get_last_iter_summary(),
             "penalty": _state.get_penalty_count(),
+            "pending_run_ts": self._pending_run_ts,
+            "pending_uid": self._pending_uid,
+            "fail_streak": self._fail_streak,
             "last_abstracts": self._last_abstracts,
             "pending_messages": _state.get_pending(),
             "knowledge_suggestions": _state.get_knowledge_suggestions(),

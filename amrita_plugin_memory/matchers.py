@@ -1,6 +1,7 @@
 """NoneBot2 命令：/memory"""
 
-from typing import cast
+from datetime import datetime, tzinfo
+from typing import Any, cast
 
 from amrita.plugins.chat.utils.functions import split_message_into_chats
 from amrita.plugins.menu.models import MatcherData
@@ -65,6 +66,12 @@ async def _(
         if not await _is_admin(event):
             await matcher.finish(f"未知选项：{sub}")
         await matcher.finish(await _trigger_dmn())
+
+    if sub in ("heatmap", "heat", "热图", "热度图"):
+        if not await _is_admin(event):
+            await matcher.finish(f"未知选项：{sub}")
+        await _send_heatmap(matcher)
+        await matcher.finish()
 
     ope = AsyncUserMemory(get_db_conn())
     await ope.init()
@@ -146,6 +153,67 @@ async def _trigger_dmn() -> str:
         return "潜意识调度未启动：钩子挂载失败或启动异常，检查日志"
     await runner.trigger_now()
     return "已触发，潜意识将在后台跑一轮"
+
+
+_WD_SHORT = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")
+
+
+async def _send_heatmap(matcher: Matcher) -> None:
+    """渲染 7×12 热度图并发送，附带下次运行时间。"""
+    from .rethinking import _state
+    from .rethinking.heatmap import render_heatmap_png
+
+    cfg = (await DataManager().safe_get_config()).subconscious
+    if not cfg.enabled:
+        await matcher.finish("潜意识调度未启用：subconscious.enabled 为 false")
+    runner = _state.get_runner()
+    if runner is None:
+        await matcher.finish("潜意识调度未启动：钩子挂载失败或启动异常，检查日志")
+
+    snap = runner.scheduler_snapshot()
+    planner = runner.planner
+    caption = _heatmap_caption(snap, planner.tz)
+    try:
+        png = render_heatmap_png(
+            planner,
+            next_run=snap["next_run"],
+            plan=snap["plan"],
+            penalty=int(snap["penalty"]),
+        )
+    except Exception as e:
+        # 出图失败不能连文字状态一起吞掉，退回纯文本
+        logger.opt(exception=e, colors=True, raw=True).error(
+            f"[Subconscious] Heatmap render failed: {e}"
+        )
+        await matcher.finish(caption)
+
+    await matcher.send(MessageSegment.image(png))
+    await matcher.finish(caption)
+
+
+def _heatmap_caption(snap: dict[str, Any], tz: tzinfo) -> str:
+    """图下那行状态：下次触发时刻、窗口长度与当前是否在跑。"""
+    next_run: datetime | None = snap["next_run"]
+    if next_run is None:
+        head = "下次运行：尚未排期，等用户下一条消息触发规划"
+    else:
+        local = next_run.astimezone(tz)
+        head = (
+            f"下次运行：{local.strftime('%m-%d')} "
+            f"{_WD_SHORT[local.weekday()]} {local.strftime('%H:%M')}"
+        )
+
+    plan = snap["plan"]
+    if plan is None:
+        return f"{head}\n暂无规划记录，热度图只反映历史观测。"
+    end = plan.end.astimezone(tz)
+    state = "运行中" if snap["is_running"] else "待命"
+    return (
+        f"{head}\n"
+        f"窗口 {plan.start.strftime('%H:%M')}-{end.strftime('%H:%M')} · "
+        f"{plan.length_minutes} 分钟 · tier={plan.tier} · "
+        f"penalty #{snap['penalty']} · {state}"
+    )
 
 
 MEMO_SEGMENT_CHARS = 600

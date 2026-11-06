@@ -206,6 +206,9 @@ class PlannerState:
 
     fine: list[float] = field(default_factory=lambda: [0.0] * CELLS)
     coarse: list[float] = field(default_factory=lambda: [0.0] * SLOTS_PER_DAY)
+    #: 累计观测条数，不参与衰减：热度会随半衰期变淡，但"来过多少条"不该缩水
+    raw_fine: list[float] = field(default_factory=lambda: [0.0] * CELLS)
+    raw_coarse: list[float] = field(default_factory=lambda: [0.0] * SLOTS_PER_DAY)
     seen_days: list[str] = field(default_factory=list)
     recent: list[float] = field(default_factory=list)
     last_update: float = 0.0
@@ -217,6 +220,8 @@ class PlannerState:
         return {
             "fine": [round(v, 6) for v in self.fine],
             "coarse": [round(v, 6) for v in self.coarse],
+            "raw_fine": [round(v, 6) for v in self.raw_fine],
+            "raw_coarse": [round(v, 6) for v in self.raw_coarse],
             "seen_days": self.seen_days[-_MAX_SEEN_DAYS:],
             "recent": self.recent[-_MAX_RECENT:],
             "last_update": self.last_update,
@@ -277,6 +282,13 @@ class IdlePlanner:
                 self.state.fine = fine
             if len(coarse) == SLOTS_PER_DAY:
                 self.state.coarse = coarse
+            # 老快照没有累计计数，留空即可，展示侧会退回衰减值
+            raw_fine = [float(v) for v in raw.get("raw_fine", [])]
+            raw_coarse = [float(v) for v in raw.get("raw_coarse", [])]
+            if len(raw_fine) == CELLS:
+                self.state.raw_fine = raw_fine
+            if len(raw_coarse) == SLOTS_PER_DAY:
+                self.state.raw_coarse = raw_coarse
             seen = raw.get("seen_days", [])
             if isinstance(seen, list):
                 self.state.seen_days = [str(d) for d in seen][-_MAX_SEEN_DAYS:]
@@ -288,9 +300,44 @@ class IdlePlanner:
             self.state.uid = self.uid
         except (TypeError, ValueError):
             self.state = PlannerState()
+            return
+        self._load_last_plan(payload)
 
     def dump(self) -> dict[str, Any]:
-        return {"idle_planner": self.state.to_dict()}
+        """连同上次规划一起落盘：重启后图里还能看到待执行窗口的细节。"""
+        out: dict[str, Any] = {"idle_planner": self.state.to_dict()}
+        plan = self._last_plan
+        if plan is not None:
+            out["last_plan"] = {
+                "start": plan.start.isoformat(),
+                "end": plan.end.isoformat(),
+                "length_minutes": plan.length_minutes,
+                "tier": plan.tier,
+                "relaxed_steps": plan.relaxed_steps,
+                "forced": plan.forced,
+                "penalty": plan.penalty,
+                "note": plan.note,
+            }
+        return out
+
+    def _load_last_plan(self, payload: dict[str, Any]) -> None:
+        """恢复上次规划；字段缺失或时间解析失败就当作没有规划。"""
+        raw = payload.get("last_plan")
+        if not isinstance(raw, dict):
+            return
+        try:
+            self._last_plan = Plan(
+                start=datetime.fromisoformat(str(raw["start"])),
+                end=datetime.fromisoformat(str(raw["end"])),
+                length_minutes=int(raw.get("length_minutes", 0)),
+                tier=str(raw.get("tier", "coarse")),
+                relaxed_steps=int(raw.get("relaxed_steps", 0)),
+                forced=bool(raw.get("forced", False)),
+                penalty=int(raw.get("penalty", 0)),
+                note=str(raw.get("note", "")),
+            )
+        except (KeyError, TypeError, ValueError):
+            self._last_plan = None
 
     def _decay(self, now_ts: float) -> None:
         if self.state.last_update <= 0:
@@ -312,6 +359,8 @@ class IdlePlanner:
         wd, slot = slot_of(now_ts, self.tz)
         self.state.fine[_cell(wd, slot)] += 1.0
         self.state.coarse[slot] += 1.0
+        self.state.raw_fine[_cell(wd, slot)] += 1.0
+        self.state.raw_coarse[slot] += 1.0
         day_key = datetime.fromtimestamp(now_ts, self.tz).strftime("%Y-%m-%d")
         if day_key not in self.state.seen_days:
             self.state.seen_days.append(day_key)
@@ -587,9 +636,11 @@ class IdlePlanner:
     def fallback_plan(
         self, penalty: int = 1, now: datetime | None = None, note: str = "no_history"
     ) -> Plan:
-        """直接给出保底窗口，不做冷段扫描。"""
+        """直接给出保底窗口，不做冷段扫描；结果同样记为上次规划。"""
         now = now or datetime.now(timezone.utc)
-        return self._fallback(now.astimezone(self.tz), penalty, note)
+        plan = self._fallback(now.astimezone(self.tz), penalty, note)
+        self._last_plan = plan
+        return plan
 
     def plan(self, penalty: int = 1, now: datetime | None = None) -> Plan:
         result = self._plan(penalty, now)
