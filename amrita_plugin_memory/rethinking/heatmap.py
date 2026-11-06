@@ -177,6 +177,18 @@ def _y_of(moment: datetime) -> float:
     return GRID_TOP + minutes / SLOT_MINUTES * CELL_H
 
 
+def _inset_y(y: float, *, top: bool) -> float:
+    """横边正好落在槽边界时向格内收一点。
+
+    收之前这条线压在两个格子之间的缝上，看着像框没对齐槽；
+    落在槽中间的分界（比如 03:00）保持原位，那才是真实时间。
+    """
+    slot = (y - GRID_TOP) / CELL_H
+    if abs(slot - round(slot)) < 1e-6:
+        return y + (_px(3) if top else -_px(3))
+    return y
+
+
 def _window_rects(plan: Plan, tz) -> list[tuple[int, float, float]]:
     """把计划窗口拆成每列一段 (星期几, 纵起, 纵止)，按真实分钟定位。
 
@@ -192,7 +204,13 @@ def _window_rects(plan: Plan, tz) -> list[tuple[int, float, float]]:
         seg_start = max(start, day)
         seg_end = min(end, day + timedelta(days=1))
         if seg_end > seg_start:
-            rects.append((day.weekday(), _y_of(seg_start), _y_of(seg_end)))
+            rects.append(
+                (
+                    day.weekday(),
+                    _inset_y(_y_of(seg_start), top=True),
+                    _inset_y(_y_of(seg_end), top=False),
+                )
+            )
         day += timedelta(days=1)
     return rects
 
@@ -287,8 +305,9 @@ def render_heatmap_png(
         overlay = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 0))
         od = ImageDraw.Draw(overlay)
         for wd, y0, y1 in _window_rects(plan, tz):
-            x0 = GRID_LEFT + wd * CELL_W + _px(2)
-            x1 = GRID_LEFT + (wd + 1) * CELL_W - _px(2)
+            # 和格子的内缩量保持一致，框才贴着槽边而不是压在两格之间的缝上
+            x0 = GRID_LEFT + wd * CELL_W + _px(3)
+            x1 = GRID_LEFT + (wd + 1) * CELL_W - _px(3)
             od.rounded_rectangle(
                 (x0, y0, x1, y1),
                 radius=_px(5),
