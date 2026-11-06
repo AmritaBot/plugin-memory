@@ -289,6 +289,12 @@ class IdlePlanner:
                 self.state.raw_fine = raw_fine
             if len(raw_coarse) == SLOTS_PER_DAY:
                 self.state.raw_coarse = raw_coarse
+            # 升级前的快照没有累计计数：拿衰减值当起点，
+            # 否则格内数字从 0 重来，和颜色对不上
+            if not any(self.state.raw_fine) and any(self.state.fine):
+                self.state.raw_fine = list(self.state.fine)
+            if not any(self.state.raw_coarse) and any(self.state.coarse):
+                self.state.raw_coarse = list(self.state.coarse)
             seen = raw.get("seen_days", [])
             if isinstance(seen, list):
                 self.state.seen_days = [str(d) for d in seen][-_MAX_SEEN_DAYS:]
@@ -662,13 +668,20 @@ class IdlePlanner:
     def _pick_run(
         self, runs: Sequence[tuple[int, int, int]], now: datetime
     ) -> tuple[int, int, int] | None:
-        """在满足门槛的冷段里挑一段：优先最近的、尚未来临的、较长的。"""
+        """在满足门槛的冷段里挑一段：优先还没结束的、最近的、较长的。
+
+        旧逻辑把"起点已过"的段一律排到后面，跨到下周的同类时段反而排在前面，
+        结果常常直接跳到七天后的同一时段。改成看段尾：还没结束的段就是可用的，
+        起点已过交给 _refine 从当前时刻起算。
+        """
         best: tuple[int, int, int] | None = None
         best_key: tuple[int, float, int] | None = None
+        now_local = now.astimezone(self.tz)
         for start_slot, length_slots, owner in runs:
-            seg_start, _ = self._seg_bounds(start_slot, length_slots, owner, now)
-            delay = max(0.0, (seg_start - now.astimezone(self.tz)).total_seconds())
-            key = (0 if delay > 0 else 1, delay, -length_slots)
+            seg_start, seg_end = self._seg_bounds(start_slot, length_slots, owner, now)
+            live = 0 if seg_end > now_local else 1
+            delay = max(0.0, (seg_start - now_local).total_seconds())
+            key = (live, delay, -length_slots)
             if best_key is None or key < best_key:
                 best_key = key
                 best = (start_slot, length_slots, owner)

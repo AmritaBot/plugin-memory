@@ -291,8 +291,9 @@ def render_heatmap_png(
         dt_days = max(0.0, (now_local.timestamp() - state.last_update) / 86400)
     decay = 2 ** (-dt_days / planner.tau_fine) if dt_days else 1.0
     weights = [max(0.0, v) * decay for v in state.fine]
-    # 分母取累计峰值：整张图会随时间一起变淡，而不是每格重新拉满到最亮
-    peak = max(1.0, max(counts)) if counts else 1.0
+    # 分母取累计峰值与当前峰值的较大者：既随时间整体变淡，也不会因为
+    # 累计计数还没攒起来就把每格都顶到最亮（升级当天的典型情况）
+    peak = max(1.0, max(weights), max(counts)) if counts else 1.0
 
     for wd in range(DAYS):
         cx = GRID_LEFT + (wd + 0.5) * CELL_W
