@@ -248,7 +248,7 @@ def render_heatmap_png(
 
     draw.text(
         (PAD, _px(26)),
-        _t("潜意识热度图", "Subconscious heatmap"),
+        _t("DMN 调度热力图", "DMN schedule heatmap"),
         font=f_title,
         fill=TEXT,
     )
