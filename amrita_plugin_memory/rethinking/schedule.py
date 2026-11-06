@@ -4,7 +4,8 @@
 - 观测：用户每条消息让对应 (星期几, 2h 槽) 权重 +1，并随时间衰减。
 - 分层：fine(单片星期几) / mid(工作日-周末) / coarse(全局)，逐级降级。
 - 收缩：fine/mid 向 coarse 按有效样本天数加权，避免稀薄样本失真。
-- 规划：环形找连续冷槽 -> 段内用原始时间戳做分钟级二分 -> 扣 buffer 得可用窗口。
+- 规划：候选日覆盖今天起的一周 -> 逐天找连续冷槽 -> 段内用原始时间戳做分钟级二分
+  -> 扣 buffer 得可用窗口。
 - 保底：冷段不足门槛时逐次减半放宽，最后强制取最长冷段。
 
 本模块不依赖 nonebot，纯数据 + 纯函数，可脱离运行时单独验证。
@@ -548,9 +549,8 @@ class IdlePlanner:
 
     def _refine(
         self,
-        start_slot: int,
-        length_slots: int,
-        wd: int,
+        seg_start: datetime,
+        seg_end: datetime,
         now: datetime,
         tier: str,
         penalty: int,
@@ -562,7 +562,6 @@ class IdlePlanner:
         段内连一次运行都放不下时返回 None，交给调用方换下一段，
         而不是报出一个实际用不了的时间窗。
         """
-        seg_start, seg_end = self._seg_bounds(start_slot, length_slots, wd, now)
         now_local = now.astimezone(self.tz)
         if seg_start < now_local:
             seg_start = now_local + timedelta(minutes=1)
@@ -665,50 +664,71 @@ class IdlePlanner:
             return self.base_slots
         return max(1, min(round(want), self.max_slots))
 
-    def _pick_run(
-        self, runs: Sequence[tuple[int, int, int]], now: datetime
-    ) -> tuple[int, int, int] | None:
-        """在满足门槛的冷段里挑一段：优先还没结束的、最近的、较长的。
+    def _candidates(
+        self, days: Sequence[datetime], tier: str, need_slots: int, now: datetime
+    ) -> list[tuple[datetime, datetime, int]]:
+        """把未来一周里每一天的冷段换成绝对时间，丢掉已经结束的。
 
-        旧逻辑把"起点已过"的段一律排到后面，跨到下周的同类时段反而排在前面，
-        结果常常直接跳到七天后的同一时段。改成看段尾：还没结束的段就是可用的，
-        起点已过交给 _refine 从当前时刻起算。
+        只看今天会把整天空窗漏掉：今天的表里冷段早被最近几天的活动挤没了，
+        选出来只剩"下周五凌晨"这种同星期几的时段，而周一到周三明明整天空着。
         """
-        best: tuple[int, int, int] | None = None
-        best_key: tuple[int, float, int] | None = None
         now_local = now.astimezone(self.tz)
-        for start_slot, length_slots, owner in runs:
-            seg_start, seg_end = self._seg_bounds(start_slot, length_slots, owner, now)
-            live = 0 if seg_end > now_local else 1
-            delay = max(0.0, (seg_start - now_local).total_seconds())
-            key = (live, delay, -length_slots)
-            if best_key is None or key < best_key:
-                best_key = key
-                best = (start_slot, length_slots, owner)
-        return best
+        out: list[tuple[datetime, datetime, int]] = []
+        for day in days:
+            wd = day.weekday()
+            if tier not in self._tiers_for(wd):
+                continue
+            for start_slot, length_slots, _ in self._cold_runs(tier, wd):
+                if length_slots < need_slots:
+                    continue
+                seg_start = day + timedelta(minutes=start_slot * SLOT_MINUTES)
+                seg_end = seg_start + timedelta(minutes=length_slots * SLOT_MINUTES)
+                if seg_end <= now_local:
+                    continue
+                out.append((seg_start, seg_end, length_slots))
+        return out
+
+    def _nearest(
+        self, cands: Sequence[tuple[datetime, datetime, int]], now: datetime
+    ) -> tuple[datetime, datetime, int] | None:
+        """最近的一段；同样近就取更长的，避免周内几段打平时挑到短的。"""
+        if not cands:
+            return None
+        now_local = now.astimezone(self.tz)
+        return min(
+            cands,
+            key=lambda c: (
+                max(0.0, (c[0] - now_local).total_seconds()),
+                -(c[1] - c[0]),
+            ),
+        )
 
     def _plan(self, penalty: int = 1, now: datetime | None = None) -> Plan:
         now = now or datetime.now(timezone.utc)
         local = now.astimezone(self.tz)
-        wd = local.weekday()
 
         if sum(self.state.coarse) <= 1e-6:
             return self._fallback(local, penalty, "no_history")
 
         want = self._want_slots(penalty)
+        # 候选日覆盖今天起的一周：周一到周三这种整天空窗，只看今天永远选不到
+        days = [
+            local.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=i)
+            for i in range(DAYS)
+        ]
+        tiers = ("fine", "mid", "coarse")
 
-        tiers = self._tiers_for(wd)
         for step in range(self.max_relax + 1):
             need_slots = max(1, want >> step)
             for tier in tiers:
-                runs = [r for r in self._cold_runs(tier, wd) if r[1] >= need_slots]
-                picked = self._pick_run(runs, now)
+                picked = self._nearest(
+                    self._candidates(days, tier, need_slots, now), now
+                )
                 if picked is None:
                     continue
                 plan = self._refine(
                     picked[0],
                     picked[1],
-                    picked[2],
                     now,
                     tier,
                     penalty,
@@ -718,16 +738,15 @@ class IdlePlanner:
                 if plan is not None:
                     return plan
 
-        # 全部放宽仍不足：强制取最长冷段
+        # 全部放宽仍不足：取一周内最长的那段冷段
         for tier in tiers:
-            runs = sorted(self._cold_runs(tier, wd), key=lambda r: -r[1])
-            picked = self._pick_run(runs, now)
-            if picked is None:
+            cands = self._candidates(days, tier, 1, now)
+            if not cands:
                 continue
+            picked = max(cands, key=lambda c: c[1] - c[0])
             plan = self._refine(
                 picked[0],
                 picked[1],
-                picked[2],
                 now,
                 tier,
                 penalty,
@@ -738,14 +757,15 @@ class IdlePlanner:
                 return plan
 
         # 完全没有可用冷段（用户几乎全天活跃）：退到热度最低的连续段
-        for tier in tiers:
+        wd = local.weekday()
+        for tier in self._tiers_for(wd):
             floor_run = self._lightest_run(tier, wd, 1, now)
             if floor_run is None:
                 continue
+            seg_start, seg_end = self._seg_bounds(floor_run[0], floor_run[1], wd, now)
             plan = self._refine(
-                floor_run[0],
-                floor_run[1],
-                wd,
+                seg_start,
+                seg_end,
                 now,
                 tier,
                 penalty,
