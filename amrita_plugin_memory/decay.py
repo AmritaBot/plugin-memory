@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 from typing import Any, Literal
 
@@ -138,6 +138,29 @@ def rerank_query_result(
     now: datetime | None = None,
 ) -> dict[str, Any]:
     """按衰减得分重排 QueryResult，并截断到 top_k；meta 里回填 decay_score。"""
+    ids_nested = result.get("ids")
+    if not ids_nested or not ids_nested[0]:
+        return dict(result)
+    size = len(ids_nested[0])
+    dists = _inner_list(result.get("distances"), size)
+    relevance = [similarity_from_distance(d) for d in dists]
+    return rerank_by_scores(result, relevance, top_k, base_half_life, boost, floor, now)
+
+
+def rerank_by_scores(
+    result: Mapping[str, Any],
+    relevance: Sequence[float],
+    top_k: int,
+    base_half_life: float,
+    boost: float,
+    floor: float,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """按调用方给的相关系数重排，并乘上时间衰减。
+
+    混合检索的分数是融合出来的名次分，不再是距离，所以由调用方直接给
+    relevance；``rerank_query_result`` 只是把它从距离推一遍。
+    """
     now = now or datetime.now(timezone.utc)
     ids_nested = result.get("ids")
     if not ids_nested or not ids_nested[0]:
@@ -145,17 +168,16 @@ def rerank_query_result(
     ids = list(ids_nested[0])
     size = len(ids)
     metas = _inner_list(result.get("metadatas"), size)
-    dists = _inner_list(result.get("distances"), size)
 
     scores: list[float] = []
     for i in range(size):
         meta = metas[i] if isinstance(metas[i], dict) else {}
         created = parse_created_at(meta.get("created_at"))
         age = age_days(created, now) if created else 0.0
-        similarity = similarity_from_distance(dists[i])
+        sim = float(relevance[i]) if i < len(relevance) else 0.0
         scores.append(
             decay_score(
-                similarity,
+                sim,
                 age,
                 str(meta.get("importance", "medium")),
                 base_half_life,

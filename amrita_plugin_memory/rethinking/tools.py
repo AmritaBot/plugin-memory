@@ -111,6 +111,8 @@ async def subconscious_read_memory(data: dict[str, Any]) -> str:
             str(data["query"]),
             top_k=top_k,
             importance=(importance_raw if importance_raw is not None else None),
+            mode=data.get("mode"),
+            vector_weight=data.get("vector_weight"),
         )
         return json.dumps(result, ensure_ascii=False, indent=2, default=str)
     except Exception as e:

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import uuid
 from asyncio import to_thread
 from collections import defaultdict
@@ -7,7 +9,7 @@ from collections.abc import Awaitable, Callable, Sequence
 from datetime import datetime
 from functools import wraps
 from inspect import iscoroutinefunction
-from typing import Any, Literal, TypeVar, cast, overload
+from typing import Any, Literal, TypeVar, overload
 from uuid import UUID
 
 import aiologic
@@ -34,7 +36,12 @@ from pydantic import BaseModel, Field
 from pytz import utc
 
 from .config import VECTOR_DB_PATH, DataManager, DecayConfig, build_preset, env_config
-from .decay import plan_action, rerank_query_result
+from .decay import (
+    plan_action,
+    rerank_by_scores,
+    similarity_from_distance,
+)
+from .retrieval import bm25_scores, normalize_scores, weighted_rrf
 
 T = TypeVar("T")
 
@@ -44,6 +51,77 @@ MEMORY_COLLECTION_NAME = "amrita_user_memory"
 _collection_lock_pool: defaultdict[str, WeakValueLRUCache[str, aiologic.Lock]] = (
     defaultdict(lambda: WeakValueLRUCache(capacity=1024, loose_mode=True))
 )
+
+
+#: 仅关键词部署时占位向量的宽度与取值
+_PLACEHOLDER_DIM = 8
+_PLACEHOLDER_VALUE = 1e-6
+
+_embed_available: bool | None = None
+_embed_probe_lock = asyncio.Lock()
+
+
+async def embedding_available() -> bool:
+    """嵌入服务是否可用。
+
+    首次调用实际打一次嵌入请求并把结果缓存下来：显式关掉
+    ``EMBEDDING_ENABLED`` 直接返回 False，探测失败则长期降级为关键词检索，
+    不让每次读写都去撞一个连不上的服务。
+    """
+    global _embed_available
+    if env_config.embedding_enabled is False:
+        return False
+    if _embed_available is not None:
+        return _embed_available
+    async with _embed_probe_lock:
+        if _embed_available is None:
+            try:
+                probe = await call_embedding(["ping"], build_preset())
+                _embed_available = bool(probe) and bool(probe[0].embedding)
+            except Exception as e:
+                logger.warning(f"[Memory] 嵌入模型不可用，L2 降级为仅关键词检索：{e}")
+                _embed_available = False
+    return _embed_available
+
+
+def reset_embedding_state() -> None:
+    """忘掉探测结果，配置变更或模型恢复后重新探测。"""
+    global _embed_available
+    _embed_available = None
+
+
+async def resolve_query_mode(
+    mode: str | None,
+) -> Literal["keyword", "vector", "hybrid"]:
+    """把模式名解析成实际可执行的一种。
+
+    auto 看嵌入服务在不在；显式 vector 在服务缺席时抛错，
+    因为静默换成关键词等于换了检索语义。
+    """
+    normalized = (mode or "auto").strip().lower()
+    if normalized == "keyword":
+        return "keyword"
+    if normalized not in {"auto", "hybrid", "vector"}:
+        raise ValueError(f"unknown retrieval mode: {mode!r}")
+    available = await embedding_available()
+    if normalized == "vector":
+        if not available:
+            raise RuntimeError(
+                "嵌入模型不可用，vector 模式无法执行；请改用 auto 或 keyword"
+            )
+        return "vector"
+    return "hybrid" if available else "keyword"
+
+
+def _first_inner(value: Any) -> list[Any]:
+    """取 QueryResult 里 list-of-list 的内层；兼容 ndarray，缺失返回空表。"""
+    if value is None:
+        return []
+    if hasattr(value, "tolist"):
+        value = value.tolist()
+    if isinstance(value, list) and value and isinstance(value[0], list):
+        return list(value[0])
+    return []
 
 
 def get_lock(collection: str, uid: str) -> aiologic.Lock:
@@ -321,6 +399,7 @@ class AsyncUserMemory:
     api: WrappedClientAPI
     _collection_name: str = MEMORY_COLLECTION_NAME
     _collection: Collection
+    _placeholder_dim: int | None = None
 
     def __init__(
         self,
@@ -348,14 +427,60 @@ class AsyncUserMemory:
 
         return wrapper
 
+    async def _embed(self, texts: Sequence[str]) -> list[list[float]] | None:
+        """嵌入文本；模型不可用时返回 None，由调用方决定降级方式。"""
+        if not await embedding_available():
+            return None
+        vectors: Sequence[EmbeddingChunk] = await call_embedding(
+            list(texts), build_preset()
+        )
+        if len(vectors) != len(texts):
+            raise RuntimeError(
+                f"Embedding count mismatch: got {len(vectors)} for {len(texts)}"
+            )
+        return [list(v.embedding) for v in vectors]
+
+    async def _placeholder_vector(self) -> list[float]:
+        """仅关键词部署用的占位向量。
+
+        Chroma 每行都要有向量，这里给方向恒定的极小值：不参与排序，只满足
+        写入约束。宽度沿用库里已有向量，避免同一集合混入不同维度被拒。
+        """
+        if self._placeholder_dim is None:
+            dim = 0
+            with contextlib.suppress(Exception):
+                probe = await any_to_thread(
+                    self._collection.get, include=["embeddings"], limit=1
+                )
+                embeddings = probe.get("embeddings")
+                if embeddings is not None and len(embeddings):
+                    dim = len(embeddings[0])
+            self._placeholder_dim = dim or _PLACEHOLDER_DIM
+        return [_PLACEHOLDER_VALUE] * self._placeholder_dim
+
+    async def _keyword_candidates(
+        self, where: dict[str, Any], limit: int
+    ) -> tuple[list[str], list[str], list[dict]]:
+        """拉取分区内的候选，供本地 BM25 打分。"""
+        raw = await any_to_thread(
+            self._collection.get,
+            include=["documents", "metadatas"],
+            where=where,
+            limit=limit,
+        )
+        ids = list(raw.get("ids") or [])
+        documents = list(raw.get("documents") or [])
+        metadatas = [
+            meta if isinstance(meta, dict) else {}
+            for meta in (raw.get("metadatas") or [])
+        ]
+        return ids, documents, metadatas
+
     @require_init
     async def add_note(self, user_id: str, note_text: str, metadata: MemoryMetadata):
         async with get_lock(self._collection_name, user_id):
-            vector: Sequence[EmbeddingChunk] = await call_embedding(
-                [note_text], build_preset()
-            )
-            if len(vector) == 0:
-                raise RuntimeError("No embedding returned")
+            vectors = await self._embed([note_text])
+            embeddings = vectors or [await self._placeholder_vector()]
             await any_to_thread(
                 self._collection.add,
                 ids=[metadata.memory_id],
@@ -368,7 +493,7 @@ class AsyncUserMemory:
                         "created_at": metadata.created_at.isoformat(),
                     }
                 ],
-                embeddings=[vector[0].embedding],
+                embeddings=embeddings,
                 documents=[note_text],
             )
 
@@ -376,11 +501,8 @@ class AsyncUserMemory:
     async def update_note(self, user_id: str, note_text: str, metadata: MemoryMetadata):
         """更新指定记忆，使用 ChromaDB 原生 update 保证原子性"""
         async with get_lock(self._collection_name, user_id):
-            vector: Sequence[EmbeddingChunk] = await call_embedding(
-                [note_text], build_preset()
-            )
-            if len(vector) == 0:
-                raise RuntimeError("No embedding returned")
+            vectors = await self._embed([note_text])
+            embeddings = vectors or [await self._placeholder_vector()]
             await any_to_thread(
                 self._collection.update,
                 ids=[metadata.memory_id],
@@ -393,7 +515,7 @@ class AsyncUserMemory:
                         "created_at": metadata.created_at.isoformat(),
                     }
                 ],
-                embeddings=[vector[0].embedding],
+                embeddings=embeddings,
                 documents=[note_text],
             )
 
@@ -406,48 +528,125 @@ class AsyncUserMemory:
         top_k: int = 5,
         include: chromadb.Include = ["metadatas", "documents", "distances"],
         decay: DecayConfig | None = None,
-    ) -> chromadb.QueryResult:
-        policy = decay or (await DataManager().safe_get_config()).decay
-        where = {
+        mode: str | None = None,
+        vector_weight: float | None = None,
+    ) -> dict[str, Any]:
+        """按关键词、向量或两者融合检索记忆。
+
+        mode 为空取配置默认值；vector_weight 只在 hybrid 生效，默认 0.6。
+        没有可用嵌入模型时 auto/hybrid 退化为 keyword，显式 vector 报错。
+        返回结构沿用 QueryResult，另附 retrieval 说明实际模式。
+        """
+        cfg = await DataManager().safe_get_config()
+        policy = decay or cfg.decay
+        resolved = await resolve_query_mode(mode or cfg.retrieval.default_mode)
+        weight = cfg.retrieval.vector_weight if vector_weight is None else vector_weight
+        weight = min(max(float(weight), 0.0), 1.0)
+        where: dict[str, Any] = {
             "user_id": user_id,
             **({"importance": importance} if importance else {}),
         }
+        fetch_k = max(top_k, 1)
+        if policy.enabled and policy.overfetch > 1:
+            # 候选放大留给衰减重排，和纯向量路径保持一致
+            fetch_k = max(top_k * policy.overfetch, top_k)
+
         async with get_lock(self._collection_name, user_id):
-            query_vector = await call_embedding([query_text], build_preset())
-            assert len(query_vector) == 1, "Invalid embedding vector length"
-            # 软衰减要靠距离和元数据重排，缺了就补上
-            fetch_include: list[str] = list(include)
+            records: dict[str, dict[str, Any]] = {}
+            vector_rank: list[str] = []
+            if resolved in {"vector", "hybrid"}:
+                query_vector = await call_embedding([query_text], build_preset())
+                if not query_vector:
+                    raise RuntimeError("No embedding returned")
+                raw = await any_to_thread(
+                    self._collection.query,
+                    query_vector[0].embedding,
+                    [query_text],
+                    include=["documents", "metadatas", "distances"],
+                    n_results=fetch_k,
+                    where=where,
+                )
+                hit_ids = _first_inner(raw.get("ids"))
+                hit_docs = _first_inner(raw.get("documents"))
+                hit_metas = _first_inner(raw.get("metadatas"))
+                hit_dists = _first_inner(raw.get("distances"))
+                for i, rid in enumerate(hit_ids):
+                    records[rid] = {
+                        "document": hit_docs[i] if i < len(hit_docs) else "",
+                        "metadata": hit_metas[i] if i < len(hit_metas) else {},
+                        "distance": hit_dists[i] if i < len(hit_dists) else 0.0,
+                    }
+                vector_rank = list(hit_ids)
+
+            keyword_rank: list[str] = []
+            keyword_relevance: dict[str, float] = {}
+            if resolved in {"keyword", "hybrid"}:
+                k_ids, k_docs, k_metas = await self._keyword_candidates(
+                    where, cfg.retrieval.keyword_candidate_limit
+                )
+                if k_ids:
+                    raw_scores = bm25_scores(query_text, k_docs)
+                    norm = normalize_scores(raw_scores)
+                    # 零分说明一个词项都没命中，进结果只会是噪声
+                    order = sorted(
+                        (i for i in range(len(k_ids)) if raw_scores[i] > 0),
+                        key=lambda i: norm[i],
+                        reverse=True,
+                    )
+                    keyword_rank = [k_ids[i] for i in order]
+                    keyword_relevance = {k_ids[i]: norm[i] for i in order}
+                    for i in order:
+                        if k_ids[i] in records:
+                            continue
+                        records[k_ids[i]] = {
+                            "document": k_docs[i] if i < len(k_docs) else "",
+                            "metadata": k_metas[i] if i < len(k_metas) else {},
+                            "distance": 1.0 - norm[i],
+                        }
+
+            relevance: dict[str, float]
+            if resolved == "hybrid":
+                fused = weighted_rrf(vector_rank, keyword_rank, weight)
+                final_ids = [rid for rid, _ in fused]
+                relevance = dict(fused)
+            elif resolved == "keyword":
+                final_ids = keyword_rank
+                relevance = keyword_relevance
+            else:
+                final_ids = vector_rank
+                relevance = {
+                    rid: similarity_from_distance(records[rid]["distance"])
+                    for rid in final_ids
+                }
+            final_ids = final_ids[:fetch_k]
+
+            payload: dict[str, Any] = {
+                "ids": [final_ids],
+                "documents": [[records[rid]["document"] for rid in final_ids]],
+                "metadatas": [[records[rid]["metadata"] for rid in final_ids]],
+                "distances": [[records[rid]["distance"] for rid in final_ids]],
+            }
+            out: dict[str, Any]
             if policy.enabled:
-                for key in ("metadatas", "distances"):
-                    if key not in fetch_include:
-                        fetch_include.append(key)
-            fetch_k = max(top_k, 1)
-            if policy.enabled and policy.overfetch > 1:
-                # 直接按 overfetch 放大候选，不再全量取 id 数条数：
-                # n_results 超过实际条数时 chroma 自己会截断
-                fetch_k = max(top_k * policy.overfetch, top_k)
-            result = await any_to_thread(
-                self._collection.query,
-                query_vector[0].embedding,
-                [query_text],
-                include=fetch_include,
-                n_results=fetch_k,
-                where=where,
-            )
-            if not policy.enabled:
-                return result
-            reranked = rerank_query_result(
-                result,
-                top_k,
-                policy.half_life_days,
-                policy.importance_boost,
-                policy.score_floor,
-            )
+                out = rerank_by_scores(
+                    payload,
+                    [relevance.get(rid, 0.0) for rid in final_ids],
+                    top_k,
+                    policy.half_life_days,
+                    policy.importance_boost,
+                    policy.score_floor,
+                )
+            else:
+                out = {key: [inner[:top_k]] for key, (inner,) in payload.items()}
             # 调用方没要的字段不外泄
-            for key in ("metadatas", "distances"):
+            for key in ("documents", "metadatas", "distances"):
                 if key not in include:
-                    reranked.pop(key, None)
-            return cast(chromadb.QueryResult, reranked)
+                    out.pop(key, None)
+            out["retrieval"] = {
+                "mode": resolved,
+                "vector_weight": round(weight, 3),
+            }
+            return out
 
     @require_init
     async def get_all_notes(

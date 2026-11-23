@@ -23,6 +23,7 @@ import click
 from chromadb.api.models.Collection import Collection
 from chromadb.api.types import Metadata
 
+from .config import env_config
 from .embedding import (
     backup_collection,
     compute_fingerprint,
@@ -117,6 +118,9 @@ def _print_scope_counts(collection: Collection) -> None:
 
 def cmd_reindex(*, assume_yes: bool = False) -> None:
     """用当前嵌入模型全量重映射。"""
+    if env_config.embedding_enabled is False:
+        click.echo("嵌入模型已禁用（EMBEDDING_ENABLED=false），无法重映射")
+        raise click.Abort()
     collection = _get_collection()
     count = collection.count() if collection is not None else 0
     if count == 0:
