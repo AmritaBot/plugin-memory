@@ -27,9 +27,9 @@ DAYS = 7
 CELLS = DAYS * SLOTS_PER_DAY
 MINUTES_PER_DAY = SLOT_MINUTES * SLOTS_PER_DAY
 
-#: 最近消息时间戳缓冲上限（分钟级细化用，不能无限涨）
+# 最近消息时间戳缓冲上限（分钟级细化用，不能无限涨）
 _MAX_RECENT = 500
-#: 活跃日期登记上限
+# 活跃日期登记上限
 _MAX_SEEN_DAYS = 240
 
 _LOG = logging.getLogger(__name__)
@@ -207,16 +207,16 @@ class PlannerState:
 
     fine: list[float] = field(default_factory=lambda: [0.0] * CELLS)
     coarse: list[float] = field(default_factory=lambda: [0.0] * SLOTS_PER_DAY)
-    #: 累计观测条数，不参与衰减：热度会随半衰期变淡，但"来过多少条"不该缩水
+    # 累计观测条数，不参与衰减：热度会随半衰期变淡，但"来过多少条"不该缩水
     raw_fine: list[float] = field(default_factory=lambda: [0.0] * CELLS)
     raw_coarse: list[float] = field(default_factory=lambda: [0.0] * SLOTS_PER_DAY)
     seen_days: list[str] = field(default_factory=list)
     recent: list[float] = field(default_factory=list)
     last_update: float = 0.0
-    #: 热度图对应的时区名与目标用户，任一变化都要重建，否则星期几/钟点对不上
+    # 热度图对应的时区名与目标用户，任一变化都要重建，否则星期几/钟点对不上
     tz_name: str = ""
     uid: str = ""
-    #: 累计计数里有从衰减权重补出来的格子，展示时要注明是估算
+    # 累计计数里有从衰减权重补出来的格子，展示时要注明是估算
     migrated_counts: bool = False
 
     def to_dict(self) -> dict[str, Any]:

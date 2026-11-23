@@ -24,7 +24,7 @@ class ProfileResult(TypedDict):
     range_end: int
 
 
-#: 画像文件路径
+# 画像文件路径
 PROFILE_PATH: Path = DATA_PATH / "user_profile.md"
 
 

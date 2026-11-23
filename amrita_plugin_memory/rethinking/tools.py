@@ -61,11 +61,11 @@ try:  # chromadb 自带 numpy；缺了只是少一层预筛，不影响主流程
 except ImportError:
     _np = None
 
-#: duplicate_helper 单次返回的记忆条数默认值 / 上限
+# duplicate_helper 单次返回的记忆条数默认值 / 上限
 _DUPLICATE_DEFAULT_LIMIT = 40
 _DUPLICATE_MAX_LIMIT = 200
 
-#: get_context 里向量库操作的超时上限（秒），超时只标 stale 不阻塞循环
+# get_context 里向量库操作的超时上限（秒），超时只标 stale 不阻塞循环
 _CONTEXT_DB_TIMEOUT = 8.0
 
 _SUBCONSCIOUS_TOOLS = _state.get_tools_manager()

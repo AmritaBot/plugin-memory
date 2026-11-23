@@ -14,9 +14,9 @@ from typing import Any, Literal
 
 Importance = Literal["low", "medium", "high"]
 
-#: importance 的序，越大寿命越长
+# importance 的序，越大寿命越长
 IMPORTANCE_RANK: dict[str, int] = {"low": 0, "medium": 1, "high": 2}
-#: 降级链，走到尽头即清理
+# 降级链，走到尽头即清理
 DEMOTE_CHAIN: dict[str, str] = {"high": "medium", "medium": "low"}
 
 _SECONDS_PER_DAY = 86400.0
