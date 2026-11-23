@@ -451,7 +451,7 @@ enable_knowledge = true
 | `VECTOR_DB_REMOTE_HEADERS` | dict                | `{}`                   | 远程请求头                        |
 | `VECTOR_DB_TENANT`         | string              | `default`              | 租户                              |
 | `VECTOR_DB_DATABASE`       | string              | `default`              | 数据库                            |
-| `EMBEDDING_ENABLED`        | bool/(空)           | (空=自动探测)          | 关闭后完全不调用嵌入服务        |
+| `EMBEDDING_ENABLED`        | bool/(空)           | (空=自动尝试)          | 关闭后完全不调用嵌入服务        |
 | `EMBEDDING_MODEL_URL`      | string              | `http://127.0.0.1:11434` | 嵌入模型地址                    |
 | `EMBEDDING_MODEL_NAME`     | string              | `auto`                 | 模型名                            |
 | `EMBEDDING_PROCTOL`        | openai/ollama-embed | `ollama-embed`         | 协议                              |

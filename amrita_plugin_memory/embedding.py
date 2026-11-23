@@ -29,7 +29,12 @@ from nonebot import logger
 
 from .config import DATA_PATH, build_preset, env_config
 from .keys import migrate_collection_keys
-from .vector import MEMORY_COLLECTION_NAME, embedding_available, get_db_conn
+from .vector import (
+    MEMORY_COLLECTION_NAME,
+    embedding_available,
+    get_db_conn,
+    mark_embedding_failed,
+)
 
 FINGERPRINT_META = "embed_fingerprint"
 EMBED_PROTOCOL_META = "embed_protocol"
@@ -383,7 +388,7 @@ async def run_deferred_check() -> None:
     global _pending_mismatch
     if not _pending_mismatch:
         return
-    if not await embedding_available():
+    if not embedding_available():
         # 没有模型就无从重映射，等配置好再走启动检查
         logger.warning("[Memory] 嵌入模型不可用，跳过指纹重映射，保持现有数据。")
         return
@@ -401,6 +406,7 @@ async def run_deferred_check() -> None:
     try:
         done = await reindex_all()
     except Exception as e:
+        mark_embedding_failed(e)
         logger.error(f"[Memory] 重映射失败，现有数据未被修改：{e}")
         return
     logger.info(f"[Memory] 重映射完成，共 {done} 条。")

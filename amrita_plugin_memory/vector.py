@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import contextlib
 import uuid
 from asyncio import to_thread
@@ -57,60 +56,66 @@ _collection_lock_pool: defaultdict[str, WeakValueLRUCache[str, aiologic.Lock]] =
 _PLACEHOLDER_DIM = 8
 _PLACEHOLDER_VALUE = 1e-6
 
-_embed_available: bool | None = None
-_embed_probe_lock = asyncio.Lock()
+# None=还没试过，True=通，False=已判定不可用
+_embed_state: bool | None = None
 
 
-async def embedding_available() -> bool:
-    """嵌入服务是否可用。
+def embedding_state() -> bool | None:
+    """嵌入服务的已知状态；显式关掉配置时恒为 False。
 
-    首次调用实际打一次嵌入请求并把结果缓存下来：显式关掉
-    ``EMBEDDING_ENABLED`` 直接返回 False，探测失败则长期降级为关键词检索，
-    不让每次读写都去撞一个连不上的服务。
+    这里不主动探测：状态只由真实请求的成败给出。
     """
-    global _embed_available
     if env_config.embedding_enabled is False:
         return False
-    if _embed_available is not None:
-        return _embed_available
-    async with _embed_probe_lock:
-        if _embed_available is None:
-            try:
-                probe = await call_embedding(["ping"], build_preset())
-                _embed_available = bool(probe) and bool(probe[0].embedding)
-            except Exception as e:
-                logger.warning(f"[Memory] 嵌入模型不可用，L2 降级为仅关键词检索：{e}")
-                _embed_available = False
-    return _embed_available
+    return _embed_state
+
+
+def embedding_available() -> bool:
+    """是否还值得发嵌入请求。
+
+    未知状态按可用处理 —— 第一次真实调用会给出答案，失败后由
+    :func:`mark_embedding_failed` 记住，不再反复撞一个连不上的服务。
+    """
+    return embedding_state() is not False
+
+
+def mark_embedding_ok() -> None:
+    global _embed_state
+    _embed_state = True
+
+
+def mark_embedding_failed(exc: BaseException) -> None:
+    """记录不可用，只在状态翻转时告警，避免每次调用刷一遍日志。"""
+    global _embed_state
+    if _embed_state is not False:
+        logger.warning(f"[Memory] 嵌入模型不可用，L2 降级为仅关键词检索：{exc}")
+    _embed_state = False
 
 
 def reset_embedding_state() -> None:
-    """忘掉探测结果，配置变更或模型恢复后重新探测。"""
-    global _embed_available
-    _embed_available = None
+    """忘掉结论，配置变更或模型恢复后重新尝试。"""
+    global _embed_state
+    _embed_state = None
 
 
-async def resolve_query_mode(
-    mode: str | None,
-) -> Literal["keyword", "vector", "hybrid"]:
+def resolve_query_mode(mode: str | None) -> Literal["keyword", "vector", "hybrid"]:
     """把模式名解析成实际可执行的一种。
 
-    auto 看嵌入服务在不在；显式 vector 在服务缺席时抛错，
-    因为静默换成关键词等于换了检索语义。
+    已判定不可用时 auto/hybrid 退到 keyword，显式 vector 抛错 ——
+    静默换成关键词等于换了检索语义。
     """
     normalized = (mode or "auto").strip().lower()
     if normalized == "keyword":
         return "keyword"
     if normalized not in {"auto", "hybrid", "vector"}:
         raise ValueError(f"unknown retrieval mode: {mode!r}")
-    available = await embedding_available()
-    if normalized == "vector":
-        if not available:
+    if embedding_state() is False:
+        if normalized == "vector":
             raise RuntimeError(
                 "嵌入模型不可用，vector 模式无法执行；请改用 auto 或 keyword"
             )
-        return "vector"
-    return "hybrid" if available else "keyword"
+        return "keyword"
+    return "vector" if normalized == "vector" else "hybrid"
 
 
 def _first_inner(value: Any) -> list[Any]:
@@ -428,16 +433,21 @@ class AsyncUserMemory:
         return wrapper
 
     async def _embed(self, texts: Sequence[str]) -> list[list[float]] | None:
-        """嵌入文本；模型不可用时返回 None，由调用方决定降级方式。"""
-        if not await embedding_available():
+        """嵌入文本；请求失败就记不可用并返回 None，由调用方决定怎么降级。"""
+        if not embedding_available():
             return None
-        vectors: Sequence[EmbeddingChunk] = await call_embedding(
-            list(texts), build_preset()
-        )
-        if len(vectors) != len(texts):
-            raise RuntimeError(
-                f"Embedding count mismatch: got {len(vectors)} for {len(texts)}"
+        try:
+            vectors: Sequence[EmbeddingChunk] = await call_embedding(
+                list(texts), build_preset()
             )
+            if len(vectors) != len(texts):
+                raise RuntimeError(
+                    f"Embedding count mismatch: got {len(vectors)} for {len(texts)}"
+                )
+        except Exception as exc:
+            mark_embedding_failed(exc)
+            return None
+        mark_embedding_ok()
         return [list(v.embedding) for v in vectors]
 
     async def _placeholder_vector(self) -> list[float]:
@@ -539,7 +549,8 @@ class AsyncUserMemory:
         """
         cfg = await DataManager().safe_get_config()
         policy = decay or cfg.decay
-        resolved = await resolve_query_mode(mode or cfg.retrieval.default_mode)
+        requested = (mode or cfg.retrieval.default_mode).strip().lower()
+        resolved = resolve_query_mode(requested)
         weight = cfg.retrieval.vector_weight if vector_weight is None else vector_weight
         weight = min(max(float(weight), 0.0), 1.0)
         where: dict[str, Any] = {
@@ -555,28 +566,35 @@ class AsyncUserMemory:
             records: dict[str, dict[str, Any]] = {}
             vector_rank: list[str] = []
             if resolved in {"vector", "hybrid"}:
-                query_vector = await call_embedding([query_text], build_preset())
-                if not query_vector:
-                    raise RuntimeError("No embedding returned")
-                raw = await any_to_thread(
-                    self._collection.query,
-                    query_vector[0].embedding,
-                    [query_text],
-                    include=["documents", "metadatas", "distances"],
-                    n_results=fetch_k,
-                    where=where,
-                )
-                hit_ids = _first_inner(raw.get("ids"))
-                hit_docs = _first_inner(raw.get("documents"))
-                hit_metas = _first_inner(raw.get("metadatas"))
-                hit_dists = _first_inner(raw.get("distances"))
-                for i, rid in enumerate(hit_ids):
-                    records[rid] = {
-                        "document": hit_docs[i] if i < len(hit_docs) else "",
-                        "metadata": hit_metas[i] if i < len(hit_metas) else {},
-                        "distance": hit_dists[i] if i < len(hit_dists) else 0.0,
-                    }
-                vector_rank = list(hit_ids)
+                query_vector = await self._embed([query_text])
+                if query_vector is None:
+                    if requested == "vector":
+                        raise RuntimeError(
+                            "嵌入模型不可用，vector 模式无法执行；"
+                            "请改用 auto 或 keyword"
+                        )
+                    # 混合少一路还能出结果，降级成关键词并如实标注
+                    resolved = "keyword"
+                else:
+                    raw = await any_to_thread(
+                        self._collection.query,
+                        query_vector[0],
+                        [query_text],
+                        include=["documents", "metadatas", "distances"],
+                        n_results=fetch_k,
+                        where=where,
+                    )
+                    hit_ids = _first_inner(raw.get("ids"))
+                    hit_docs = _first_inner(raw.get("documents"))
+                    hit_metas = _first_inner(raw.get("metadatas"))
+                    hit_dists = _first_inner(raw.get("distances"))
+                    for i, rid in enumerate(hit_ids):
+                        records[rid] = {
+                            "document": hit_docs[i] if i < len(hit_docs) else "",
+                            "metadata": hit_metas[i] if i < len(hit_metas) else {},
+                            "distance": hit_dists[i] if i < len(hit_dists) else 0.0,
+                        }
+                    vector_rank = list(hit_ids)
 
             keyword_rank: list[str] = []
             keyword_relevance: dict[str, float] = {}
@@ -646,6 +664,8 @@ class AsyncUserMemory:
                 "mode": resolved,
                 "vector_weight": round(weight, 3),
             }
+            if requested in {"auto", "hybrid"} and resolved == "keyword":
+                out["retrieval"]["degraded"] = "embedding_unavailable"
             return out
 
     @require_init

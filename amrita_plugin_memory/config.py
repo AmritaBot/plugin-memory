@@ -256,7 +256,7 @@ class EnvConfig(BaseModel):
     embedding_enabled: bool | None = Field(
         default=None,
         description=(
-            "是否启用嵌入模型：None 为自动探测，探测失败自动降级为仅关键词检索；"
+            "是否启用嵌入模型：None 为自动尝试，请求失败后降级为仅关键词检索；"
             "false 则完全不调用嵌入服务，可用最小部署"
         ),
     )
