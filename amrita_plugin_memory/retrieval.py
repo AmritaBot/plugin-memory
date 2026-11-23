@@ -18,13 +18,13 @@ import re
 from collections import Counter
 from collections.abc import Iterable, Sequence
 
-#: BM25 词频饱和与长度归一参数，取常见默认值
+# BM25 词频饱和与长度归一参数，取常见默认值
 BM25_K1 = 1.5
 BM25_B = 0.75
-#: RRF 平滑常数。候选只取 top_k*overfetch（十几条量级），k 取 60 会把名次差
-#: 压得几乎没有，权重就翻不动顺序；20 保留头部区分度又不至于让单路垄断
+# RRF 平滑常数。候选只取 top_k*overfetch（十几条量级），k 取 60 会把名次差
+# 压得几乎没有，权重就翻不动顺序；20 保留头部区分度又不至于让单路垄断
 RRF_K = 20
-#: 默认向量权重，关键词占其余部分
+# 默认向量权重，关键词占其余部分
 DEFAULT_VECTOR_WEIGHT = 0.6
 
 _WORD_RE = re.compile(r"[a-z0-9_]+")

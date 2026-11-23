@@ -53,7 +53,7 @@ _collection_lock_pool: defaultdict[str, WeakValueLRUCache[str, aiologic.Lock]] =
 )
 
 
-#: 仅关键词部署时占位向量的宽度与取值
+# 仅关键词部署时占位向量的宽度与取值
 _PLACEHOLDER_DIM = 8
 _PLACEHOLDER_VALUE = 1e-6
 
