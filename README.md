@@ -1,15 +1,15 @@
 # amrita_plugin_memory
 
-基于向量数据库的长期记忆插件 — **三层记忆模型**：
+以 ChromaDB 为存储的长期记忆插件，关键词与向量可混用 — **三层记忆模型**：
 
 | 层 | 名称          | 类比                       | 载体                             | 何时使用             |
 | -- | ------------- | -------------------------- | -------------------------------- | -------------------- |
 | L1 | 备忘录        | 恒常激活的持久记忆         | 插件自有 ORM 表（per-uni_id 单行） | 每轮常驻注入         |
-| L2 | 向量记忆层    | 语义记忆（按线索提取）     | ChromaDB 向量库                   | LLM 按需检索         |
+| L2 | 检索记忆层    | 长尾事实（按线索提取）     | ChromaDB（documents + 可选向量）  | LLM 按需检索         |
 | L3 | 离线巩固循环  | 默认模式网络（DMN）        | 后台 ReAct Agent                  | 空闲窗口到达时整理   |
 
 - **L1** — 一段千字内的用户元信息（身份、稳定偏好、用户要求的工具调用模式），由 LLM 维护，每轮注入 system prompt。
-- **L2** — 向量化的长尾事实库，LLM 通过工具按需读写，ChromaDB 语义检索。
+- **L2** — 长尾事实库，LLM 通过工具按需读写；默认关键词与向量混合检索，没配嵌入模型时退为纯关键词。
 - **L3** — 用户聊过之后，在作息里的冷门时段触发一轮后台整理：去重、压缩、画像精炼、知识沉淀。
 
 ## 安装
@@ -29,7 +29,7 @@ ambot plugin add amrita_plugin_memory
 
 ```env
 VECTOR_DB_TYPE=local
-# 有嵌入服务时填这三行；没有就留空，L2 会走纯关键词检索
+# 有嵌入服务时填这三行；没有就把 EMBEDDING_ENABLED 设为 false，L2 走纯关键词检索
 EMBEDDING_MODEL_URL=http://127.0.0.1:11434
 EMBEDDING_MODEL_NAME=auto
 EMBEDDING_PROCTOL=ollama-embed
@@ -109,7 +109,7 @@ L1 临近上限时把细节下放到 L2，只留指针。
 
 工具三个：`read_memo`、`append_memo`（末尾追加）、`update_memo`（整篇替换）。
 
-## L2 向量记忆层
+## L2 检索记忆层
 
 `scope` 表达语义，与分区键是两个维度：
 
@@ -137,8 +137,9 @@ L1 临近上限时把细节下放到 L2，只留指针。
 写入改用占位向量占住 Chroma 的行，检索完全不走向量路径 —— 这也是 `EMBEDDING_ENABLED=false`
 时的最小部署形态。
 
-时间退化分两段：检索期按 `1/(1+d) × max(0.5^(age/half_life), floor)` 重排后截回 `top_k`
-（只重排不删）；清理期按 importance 的寿命阈值扫描，超龄先降级，降到 `low` 仍超龄才删除。
+时间退化分两段：检索期按「相关度 × `max(0.5^(age/half_life), floor)`」重排后截回 `top_k`，
+相关度在向量模式下来自距离（`1/(1+d)`）、混合模式下来自融合分（只重排不删）；
+清理期按 importance 的寿命阈值扫描，超龄先降级，降到 `low` 仍超龄才删除。
 两段都受 `[decay].enabled` 控制。
 
 ## L3 离线巩固循环（DMN）
@@ -158,7 +159,7 @@ L1 临近上限时把细节下放到 L2，只留指针。
 一分钟内补跑）；任务的 `misfire_grace_time` 置空，事件循环被卡住也不会把这次运行
 静默丢弃；单轮失败按 30 分钟间隔最多重试 3 次，用户再发消息会重置重试计数。
 
-## 嵌入模型与重映射
+## 嵌入模型与重映射（可选）
 
 向量只在同一模型下可比，换模型会让旧向量静默劣化且不报错。插件在集合 metadata 里记
 `sha256(protocol|model|base_url)`，每次启动校验；不一致时按 `EMBED_MISMATCH_POLICY`
@@ -206,7 +207,7 @@ L1 临近上限时把细节下放到 L2，只留指针。
 
 | 工具                             | 用途                                   |
 | -------------------------------- | -------------------------------------- |
-| `subconscious_read_memory`       | 语义检索                               |
+| `subconscious_read_memory`       | 记忆检索（关键词/向量/混合）           |
 | `subconscious_write_memory`      | 写入新记忆                             |
 | `subconscious_update_memory`     | 更新指定 ID 记忆                       |
 | `subconscious_delete_memory`     | 删除指定 ID 记忆                       |
@@ -288,7 +289,7 @@ L1 临近上限时把细节下放到 L2，只留指针。
 | L1 备忘录        | `UserMemo` 表（插件自有 ORM，主键 = uni_id）                 | LLM 维护的常驻用户元信息（≤ `memo_max_chars`）                                                     |
 | 循环元状态       | `SubconsciousState` 表（插件自有 ORM，uid=`amrita_memory`）  | `total_runs`、`last_abstracts`、`pending_messages`、`knowledge_suggestions`、`penalty`、`idle_planner`（热度图）|
 | Session 摘要缓存 | `LRUCache[int, str]`（最大 128 条）                          | session DB id → LLM 生成的摘要文本，避免重复调用 `ContextCompactor`                                     |
-| L2 记忆          | ChromaDB `amrita_user_memory`                                | 向量 + documents + metadatas（含嵌入指纹与分区键版本）                                             |
+| L2 记忆          | ChromaDB `amrita_user_memory`                                | documents + 向量 + metadatas；纯关键词部署写占位向量（含嵌入指纹与分区键版本）                      |
 | 用户画像         | `data/amrita_plugin_memory/user_profile.md`                  | Markdown 文件，`summary---body` 格式，行级增量更新                                                 |
 | 全局知识库       | `data/amrita_plugin_memory/knowledge/` + `knowledge_index.json` + ChromaDB | 三方同步管理                                                                        |
 | Token 统计       | `InsightsModel`（复用 Bot ORM）                              | 全局 prompt/completion token 累加                                                                  |
@@ -319,7 +320,7 @@ L1 临近上限时把细节下放到 L2，只留指针。
 
 ## 技术栈
 
-Python 3.11–3.13 / NoneBot2 / AmritaCore，向量库 ChromaDB，嵌入走 OpenAI 或 Ollama，
+Python 3.11–3.13 / NoneBot2 / AmritaCore，存储 ChromaDB，嵌入（可选）走 OpenAI 或 Ollama，
 调度 nonebot_plugin_apscheduler，持久化 nonebot_plugin_orm，配置 Pydantic + uniconf。
 
 
@@ -396,8 +397,8 @@ enable_knowledge = true
 | `decay.sweep_enabled`        | `true`  | 是否启用分层清理                            |
 | `decay.sweep_interval_hours` | `24`    | 分层清理周期（小时）                        |
 | `decay.sweep_batch_limit`    | `5000`  | 单次清理最多扫描的记忆条数                  |
-| `retrieval.default_mode`     | `auto`  | 默认检索模式：auto/hybrid/keyword/vector    |
-| `retrieval.vector_weight`    | `0.6`   | hybrid 下向量权重，其余归关键词             |
+| `retrieval.default_mode`     | `auto`  | 默认检索模式，可被 `read_memory` 的 `mode` 覆盖 |
+| `retrieval.vector_weight`    | `0.6`   | hybrid 下向量权重，可被工具参数覆盖         |
 | `retrieval.keyword_candidate_limit` | `2000` | 关键词检索单次扫描上限              |
 | `per_session_memory_limit`   | `100`   | 单个分区（uni_id）的记忆条数上限            |
 | `memo_max_chars`             | `1000`  | L1 备忘录字数硬上限                         |
