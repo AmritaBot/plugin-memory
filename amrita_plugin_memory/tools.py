@@ -11,7 +11,6 @@ from amrita_core import (
     ToolContext,
     on_tools,
 )
-from chromadb import QueryResult
 from nonebot import logger
 from nonebot.adapters.onebot.v11 import Event as OB11Event
 
@@ -112,6 +111,24 @@ READ_MEMORY_FUN = FunctionDefinitionSchema(
                 type="string",
                 description="重要性等级，Optional",
                 enum=["low", "medium", "high"],
+                nullable=True,
+            ),
+            "mode": FunctionPropertySchema(
+                type="string",
+                description=(
+                    "检索模式：auto=有嵌入模型时混合、否则关键词；"
+                    "hybrid=关键词+向量融合；keyword=仅关键词（精确匹配、无需模型）；"
+                    "vector=仅语义。不填用配置默认值"
+                ),
+                enum=["auto", "hybrid", "keyword", "vector"],
+                nullable=True,
+            ),
+            "vector_weight": FunctionPropertySchema(
+                type="number",
+                description=(
+                    "hybrid 模式下向量的权重，0~1，其余归关键词，默认 0.6；"
+                    "只在 hybrid 生效"
+                ),
                 nullable=True,
             ),
             "scope": _SCOPE_PROP,
@@ -274,11 +291,13 @@ async def r(ctx: ToolContext) -> str:
     logger.debug("开始检索记忆...")
     logger.debug(f"scope={scope}, partition_id={partition_id}")
     try:
-        res: QueryResult = await ope.query_notes(
+        res = await ope.query_notes(
             partition_id,
             ctx.data["query"],
             top_k=ctx.data.get("top_k", 5),
             importance=ctx.data.get("importance"),
+            mode=ctx.data.get("mode"),
+            vector_weight=ctx.data.get("vector_weight"),
         )
         return json.dumps(res, ensure_ascii=False, indent=4)
     except Exception as e:

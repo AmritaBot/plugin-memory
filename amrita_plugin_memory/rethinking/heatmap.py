@@ -28,7 +28,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 from .schedule import DAYS, SLOT_MINUTES, SLOTS_PER_DAY, IdlePlanner, Plan
 
-#: 超采样倍率：1x 下 12px 中文基本看不清，整体放大后出图
+# 超采样倍率：1x 下 12px 中文基本看不清，整体放大后出图
 SCALE = 2
 _LOGICAL_W = 760
 _LOGICAL_H = 814
@@ -51,7 +51,7 @@ ACCENT = (141, 180, 216)
 HOT_MARK = (242, 209, 139)
 NOW_MARK = (224, 122, 95)
 
-#: 冷 -> 热的取色节点，最后一档偏暖，让热点一眼可见
+# 冷 -> 热的取色节点，最后一档偏暖，让热点一眼可见
 _RAMP = (
     (0.0, (26, 34, 44)),
     (0.3, (32, 62, 90)),

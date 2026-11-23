@@ -25,6 +25,20 @@ READ_MEMORY_SCHEMA = FunctionDefinitionSchema(
                 enum=["low", "medium", "high"],
                 nullable=True,
             ),
+            "mode": FunctionPropertySchema(
+                type="string",
+                description=(
+                    "检索模式：auto 有模型时混合、否则关键词；hybrid 融合；"
+                    "keyword 仅关键词；vector 仅语义"
+                ),
+                enum=["auto", "hybrid", "keyword", "vector"],
+                nullable=True,
+            ),
+            "vector_weight": FunctionPropertySchema(
+                type="number",
+                description="hybrid 下向量权重 0~1，默认 0.6，其余模式忽略",
+                nullable=True,
+            ),
         },
         required=["query"],
     ),

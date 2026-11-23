@@ -178,6 +178,30 @@ class DecayConfig(BaseModel):
     )
 
 
+class RetrievalConfig(BaseModel):
+    """L2 检索策略：关键词与向量的取舍。"""
+
+    default_mode: Literal["auto", "hybrid", "keyword", "vector"] = Field(
+        default="auto",
+        description=(
+            "默认检索模式：auto 在有嵌入模型时用 hybrid，否则退到 keyword；"
+            "hybrid 关键词与向量融合；keyword 仅关键词；vector 仅语义"
+        ),
+    )
+    vector_weight: float = Field(
+        default=0.6,
+        ge=0.0,
+        le=1.0,
+        description="hybrid 模式下向量的权重，其余权重归关键词，默认 0.6",
+    )
+    keyword_candidate_limit: int = Field(
+        default=2000,
+        ge=100,
+        le=20000,
+        description="关键词检索单次最多扫描的记忆条数，防止大库拖慢查询",
+    )
+
+
 class ConfigFile(BaseModel):
     """配置文件"""
 
@@ -195,6 +219,9 @@ class ConfigFile(BaseModel):
     )
     subconscious: SubconsciousConfig = Field(
         default_factory=SubconsciousConfig, description="常驻推理循环配置"
+    )
+    retrieval: RetrievalConfig = Field(
+        default_factory=RetrievalConfig, description="L2 检索策略配置"
     )
 
 
@@ -225,6 +252,13 @@ class EnvConfig(BaseModel):
     vector_db_database: str = Field(
         default="default",
         description="ChromaDB向量数据库数据库名称(当且仅当vector_db_type为remote时生效)",
+    )
+    embedding_enabled: bool | None = Field(
+        default=None,
+        description=(
+            "是否启用嵌入模型：None 为自动尝试，请求失败后降级为仅关键词检索；"
+            "false 则完全不调用嵌入服务，可用最小部署"
+        ),
     )
     embedding_model_url: str = Field(
         default="http://127.0.0.1:11434", description="Embedding模型地址"

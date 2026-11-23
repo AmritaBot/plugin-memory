@@ -48,9 +48,9 @@ from .schedule import IdlePlanner, describe
 from .types import SessionSummary
 
 _STATE_UID = "amrita_memory"
-#: 重排节流窗口（秒）
+# 重排节流窗口（秒）
 _REPLAN_THROTTLE_SECONDS = 60.0
-#: 单轮失败后的重试间隔（分钟）与连续重试上限，超限就等用户下一条消息
+# 单轮失败后的重试间隔（分钟）与连续重试上限，超限就等用户下一条消息
 _RETRY_DELAY_MINUTES = 30
 _MAX_RUN_RETRIES = 3
 _LEGACY_REPO_UID = (

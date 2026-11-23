@@ -18,9 +18,9 @@ from nonebot import get_driver, logger
 if TYPE_CHECKING:
     from nonebot.adapters.onebot.v11 import Event
 
-#: 读取知识库所需的权限节点
+# 读取知识库所需的权限节点
 KNOWLEDGE_NODE = "memory.knowledge"
-#: 管理员节点，始终持有 KNOWLEDGE_NODE
+# 管理员节点，始终持有 KNOWLEDGE_NODE
 ADMIN_NODE = "lp.admin"
 
 _ENV_ADMINS = get_driver().config.superusers

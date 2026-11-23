@@ -10,7 +10,7 @@ from nonebot_plugin_apscheduler import scheduler
 from .config import DataManager
 from .vector import AsyncUserMemory, get_db_conn
 
-#: 分层清理任务的 job id，重复注册时先移除
+# 分层清理任务的 job id，重复注册时先移除
 SWEEP_JOB_ID = "amrita_memory_decay_sweep"
 
 
